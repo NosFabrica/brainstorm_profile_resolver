@@ -63,18 +63,22 @@ class ProfileResolver(
                         else -> async { resolveLightning(user.pubkey, wanted) }
                     }
                 }
-            val nip05Jobs =
-                users.values.mapNotNull { user ->
-                    val wanted = latest.getValue(user.pubkey).nip05
-                    when {
-                        wanted == null && user.nip05 == null -> null
-                        wanted == null -> async { Nip05Write(user.pubkey, null, null, null) }
-                        wanted.toValue() == user.nip05 && !nip05Due(user) -> null
-                        else -> async { verifyNip05(user.pubkey, wanted) }
-                    }
+            val nip05Cleared = mutableListOf<Nip05Write>()
+            val toVerify = mutableListOf<Pair<String, Nip05Id>>()
+            for (user in users.values) {
+                val wanted = latest.getValue(user.pubkey).nip05
+                when {
+                    wanted == null && user.nip05 == null -> {}
+                    wanted == null -> nip05Cleared += Nip05Write(user.pubkey, null, null, null)
+                    wanted.toValue() == user.nip05 && !nip05Due(user) -> {}
+                    else -> toVerify += user.pubkey to wanted
                 }
+            }
+            // A domain with many names in this batch may answer them all with one list.
+            nip05.prefetch(toVerify.map { it.second })
+            val nip05Jobs = toVerify.map { (pubkey, id) -> async { verifyNip05(pubkey, id) } }
             writeLightning(lightningJobs.awaitAll())
-            writeNip05(nip05Jobs.awaitAll())
+            writeNip05(nip05Cleared + nip05Jobs.awaitAll())
         }
     }
 
@@ -95,12 +99,9 @@ class ProfileResolver(
             val page = graph.nip05Due(checkedBefore, after, pageSize)
             if (page.isEmpty()) break
             coroutineScope {
-                val jobs =
-                    page.mapNotNull { user ->
-                        val id = user.nip05?.let { Nip05Id.parse(it) } ?: return@mapNotNull null
-                        async { verifyNip05(user.pubkey, id) }
-                    }
-                writeNip05(jobs.awaitAll())
+                val due = page.mapNotNull { user -> user.nip05?.let { Nip05Id.parse(it) }?.let { user.pubkey to it } }
+                nip05.prefetch(due.map { it.second })
+                writeNip05(due.map { (pubkey, id) -> async { verifyNip05(pubkey, id) } }.awaitAll())
             }
             after = page.last().pubkey
         }

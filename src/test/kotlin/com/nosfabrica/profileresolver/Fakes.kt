@@ -103,14 +103,17 @@ class ScriptedHttp(
     private val hold: CompletableDeferred<Unit>? = null,
 ) {
     val asked = mutableListOf<String>()
+    val maxBytesAsked = mutableMapOf<String, Long>()
 
     val http =
         object : FencedHttp(OkHttpClient()) {
             override suspend fun get(
                 url: String,
                 accept: String,
+                maxBytes: Long,
             ): FetchResult {
                 asked += url
+                maxBytesAsked[url] = maxBytes
                 hold?.await()
                 return answers[url] ?: FetchResult.AddressGone(404)
             }

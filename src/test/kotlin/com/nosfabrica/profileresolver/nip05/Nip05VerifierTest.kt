@@ -63,4 +63,93 @@ class Nip05VerifierTest {
             val (v, _) = verifier(mapOf(id("alice@e.example").toUserUrl() to FetchResult.DomainDown("timeout")))
             assertEquals(Nip05Status.PENDING, v.verify(id("alice@e.example"), alice))
         }
+
+    private fun hex(i: Int) = i.toString(16).padStart(64, '0')
+
+    private fun usersOn(
+        domain: String,
+        count: Int,
+    ) = (0 until count).map { id("user$it@$domain") to hex(it) }
+
+    private fun namesJson(entries: List<Pair<Nip05Id, String>>) =
+        entries.joinToString(",", prefix = """{"names":{""", postfix = "}}") { (id, pk) -> "\"${id.name}\":\"$pk\"" }
+
+    @Test
+    fun aBusyDomainIsAnsweredFromItsWholeList() =
+        runTest {
+            val users = usersOn("busy.example", 20)
+            val bare = Nip05Id.domainUrl("busy.example")
+            val (v, http) = verifier(mapOf(bare to FetchResult.Ok(namesJson(users))))
+
+            v.prefetch(users.map { it.first })
+            users.forEach { (id, pk) -> assertEquals(Nip05Status.VERIFIED, v.verify(id, pk)) }
+
+            assertEquals(listOf(bare), http.asked)
+            assertEquals(2L * 1024 * 1024, http.maxBytesAsked[bare], "the list gets the larger cap")
+        }
+
+    @Test
+    fun aQuietDomainIsAskedNameByName() =
+        runTest {
+            val users = usersOn("quiet.example", 19)
+            val (v, http) = verifier(users.associate { (id, pk) -> id.toUserUrl() to FetchResult.Ok(namesJson(listOf(id to pk))) })
+
+            v.prefetch(users.map { it.first })
+            users.forEach { (id, pk) -> assertEquals(Nip05Status.VERIFIED, v.verify(id, pk)) }
+
+            assertEquals(19, http.asked.size)
+            assertEquals(false, Nip05Id.domainUrl("quiet.example") in http.asked)
+        }
+
+    @Test
+    fun anEmptyOrRefusedListFallsBackToPerName() =
+        runTest {
+            for (bareAnswer in listOf(FetchResult.Ok("""{"names":{}}"""), FetchResult.AddressGone(404), FetchResult.Refused("body over 2097152 bytes"))) {
+                val users = usersOn("big.example", 20)
+                val answers = users.associate { (id, pk) -> id.toUserUrl() to (FetchResult.Ok(namesJson(listOf(id to pk))) as FetchResult) } +
+                    (Nip05Id.domainUrl("big.example") to bareAnswer)
+                val (v, http) = verifier(answers)
+
+                v.prefetch(users.map { it.first })
+                users.forEach { (id, pk) -> assertEquals(Nip05Status.VERIFIED, v.verify(id, pk), "after $bareAnswer") }
+                assertEquals(21, http.asked.size, "one list request, then one per name, after $bareAnswer")
+            }
+        }
+
+    @Test
+    fun aPartialListAnswersOnlyTheNamesItHolds() =
+        runTest {
+            val users = usersOn("partial.example", 20)
+            val listed = users.take(19)
+            val missing = users.last()
+            val answers =
+                mapOf(
+                    Nip05Id.domainUrl("partial.example") to FetchResult.Ok(namesJson(listed)),
+                    missing.first.toUserUrl() to FetchResult.Ok(namesJson(listOf(missing))),
+                )
+            val (v, http) = verifier(answers)
+
+            v.prefetch(users.map { it.first })
+            users.forEach { (id, pk) -> assertEquals(Nip05Status.VERIFIED, v.verify(id, pk)) }
+            assertEquals(listOf(Nip05Id.domainUrl("partial.example"), missing.first.toUserUrl()), http.asked)
+        }
+
+    @Test
+    fun aListIsAskedForOncePerRun() =
+        runTest {
+            val users = usersOn("once.example", 20)
+            val (v, http) = verifier(mapOf(Nip05Id.domainUrl("once.example") to FetchResult.AddressGone(404)))
+            v.prefetch(users.map { it.first })
+            v.prefetch(users.map { it.first })
+            assertEquals(1, http.asked.count { it == Nip05Id.domainUrl("once.example") })
+        }
+
+    @Test
+    fun aListedNameWithAnotherKeyIsAMismatch() =
+        runTest {
+            val users = usersOn("other.example", 20)
+            val (v, _) = verifier(mapOf(Nip05Id.domainUrl("other.example") to FetchResult.Ok(namesJson(users))))
+            v.prefetch(users.map { it.first })
+            assertEquals(Nip05Status.MISMATCH, v.verify(users[0].first, hex(999)))
+        }
 }

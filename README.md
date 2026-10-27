@@ -50,8 +50,13 @@ The other Brainstorm services depend on these names, so they are a contract.
      backs the whole domain off — 1 h, 6 h, 1 day, 3 days, then weekly — and its addresses stay
      `PENDING`. A 404 means the server is up; only that address is `NOT_FOUND`.
    - **At most one request per domain per 500 ms**, and 16 in flight overall.
-   - **NIP-05s are re-checked monthly**: domains add and drop names. A domain that answers with
-     its whole `names` list answers its other names from it, within a run.
+   - **NIP-05s are re-checked monthly**: domains add and drop names. Each name is checked with
+     `?name=`, the form every domain we surveyed answers. A domain with 20 or more names due in a
+     batch is first asked once per run for its whole list (the bare `nostr.json`, up to 2 MB), which
+     then answers the names it holds. Few domains serve a usable one — of 40 surveyed (2026-10-27),
+     the biggest (primal.net, fountain.fm) return an empty list, some refuse it, coinos.io's is
+     partial, and the mostr bridges' run to megabytes — so a name missing from a list is always
+     asked for itself, and an empty, refused or oversized list costs one request and changes nothing.
 3. **Retries.** `PENDING` addresses and NIP-05s due a re-check are looked up again.
 
 Writes go to the worker's Redis set first, then Neo4j: the graph is what marks a user settled, so

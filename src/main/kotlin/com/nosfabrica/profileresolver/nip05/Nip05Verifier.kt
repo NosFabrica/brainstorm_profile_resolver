@@ -5,52 +5,85 @@ import com.nosfabrica.profileresolver.http.FencedHttp
 import com.nosfabrica.profileresolver.http.FetchResult
 import com.nosfabrica.profileresolver.store.Nip05Status
 import com.vitorpamplona.quartz.nip05DnsIdentifiers.Nip05Id
-import com.vitorpamplona.quartz.nip05DnsIdentifiers.Nip05Parser
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Checks that a NIP-05 domain maps the name to the pubkey (`names` in its `nostr.json`).
  *
  * Unlike a lightning answer this is never final for good — a domain can drop a name — so the
- * caller re-checks verified names on a schedule. Within one run, a domain that answered with its
- * whole `names` list (many ignore `?name=`) answers its other names from that list.
+ * caller re-checks verified names on a schedule.
+ *
+ * Per name (`?name=`) is the path that works everywhere. A domain's whole list (the bare
+ * `nostr.json`) is a shortcut that works on some: a survey of 40 domains (2026-10-27) found
+ * complete lists on a few (21.gifts, stacker.news), empty ones on the biggest (primal.net,
+ * fountain.fm), refusals (getalby.com 404, iris.to 418), a partial list (coinos.io) and lists in
+ * the megabytes (the mostr bridges). So a list only ever answers names it holds; a name missing
+ * from one is asked for itself.
  */
 class Nip05Verifier(
     private val http: FencedHttp,
     private val gate: DomainGate,
+    /** A domain's whole list is fetched only for a batch with at least this many of its names. */
+    private val prefetchThreshold: Int = 20,
+    private val maxListBytes: Long = 2L * 1024 * 1024,
 ) {
-    private val parser = Nip05Parser()
     private val inFlight = ConcurrentHashMap<String, CompletableDeferred<FetchResult?>>()
 
-    /** Per domain, a `nostr.json` that listed more than one name. */
-    private val fullLists = ConcurrentHashMap<String, String>()
+    /** Per domain, the `names` of a `nostr.json` that listed more than one: name → pubkey. */
+    private val lists = ConcurrentHashMap<String, Map<String, String>>()
+
+    /** Domains whose bare list this run already asked for, whatever came back. */
+    private val listTried = ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Fetches the whole list of every domain with at least [prefetchThreshold] of [ids], once
+     * per run. An empty, refused, oversized or failed list changes nothing: those names are
+     * asked for one by one, as without it.
+     */
+    suspend fun prefetch(ids: Collection<Nip05Id>) {
+        val busy =
+            ids
+                .groupingBy { it.domain }
+                .eachCount()
+                .filter { (domain, count) -> count >= prefetchThreshold && !lists.containsKey(domain) && listTried.add(domain) }
+                .keys
+        coroutineScope {
+            busy
+                .map { domain ->
+                    async {
+                        val result = gate.call(domain) { http.get(Nip05Id.domainUrl(domain), maxBytes = maxListBytes) }
+                        if (result is FetchResult.Ok) namesOf(result.body)?.takeIf { it.isNotEmpty() }?.let { lists.putIfAbsent(domain, it) }
+                    }
+                }.awaitAll()
+        }
+    }
 
     suspend fun verify(
         id: Nip05Id,
         pubkey: String,
     ): Nip05Status {
-        fullLists[id.domain]?.let { list ->
-            keyIn(id, list)?.let { return if (it == pubkey) Nip05Status.VERIFIED else Nip05Status.MISMATCH }
-            // Not in the list: it may not have been the whole list after all, so ask.
-        }
+        lists[id.domain]?.get(id.name)?.let { return if (it == pubkey) Nip05Status.VERIFIED else Nip05Status.MISMATCH }
         return when (val result = fetch(id)) {
             null, is FetchResult.DomainDown -> Nip05Status.PENDING
             is FetchResult.Refused -> Nip05Status.INVALID
             is FetchResult.AddressGone -> Nip05Status.NOT_FOUND
             is FetchResult.Ok -> {
-                if (namesIn(result.body) > 1) fullLists.putIfAbsent(id.domain, result.body)
-                when (keyIn(id, result.body)) {
-                    null -> Nip05Status.MISMATCH
-                    pubkey -> Nip05Status.VERIFIED
-                    else -> Nip05Status.MISMATCH
-                }
+                val names = namesOf(result.body)
+                // Many servers ignore `?name=` and answer with every name they hold.
+                if (names != null && names.size > 1) lists.putIfAbsent(id.domain, names)
+                if (names?.get(id.name) == pubkey) Nip05Status.VERIFIED else Nip05Status.MISMATCH
             }
         }
     }
 
+    /** One request per name per run: the same name asked twice is answered from here. */
     private suspend fun fetch(id: Nip05Id): FetchResult? {
         val url = id.toUserUrl()
         val mine = CompletableDeferred<FetchResult?>()
@@ -62,23 +95,20 @@ class Nip05Verifier(
             mine.completeExceptionally(e)
             throw e
         }
-        // Kept for the run: the same name asked twice is answered from here.
     }
 
-    private fun keyIn(
-        id: Nip05Id,
-        json: String,
-    ): String? =
-        try {
-            parser.parseHexKey(id, json)?.lowercase()
-        } catch (e: Exception) {
-            null
+    companion object {
+        /** A `nostr.json`'s `names`, keys lowercased like [Nip05Id.name], values lowercased hex; null if it has none. */
+        fun namesOf(json: String): Map<String, String>? {
+            val names =
+                try {
+                    (Json.parseToJsonElement(json) as? JsonObject)?.get("names") as? JsonObject
+                } catch (e: Exception) {
+                    null
+                } ?: return null
+            return names.entries
+                .mapNotNull { (name, key) -> (key as? JsonPrimitive)?.takeIf { it.isString }?.let { name.lowercase() to it.content.lowercase() } }
+                .toMap()
         }
-
-    private fun namesIn(json: String): Int =
-        try {
-            ((Json.parseToJsonElement(json) as? JsonObject)?.get("names") as? JsonObject)?.size ?: 0
-        } catch (e: Exception) {
-            0
-        }
+    }
 }

@@ -106,6 +106,8 @@ open class FencedHttp(
     open suspend fun get(
         url: String,
         accept: String = "application/json",
+        /** Overrides the client's cap for this one request (a domain's whole NIP-05 list). */
+        maxBytes: Long = maxBodyBytes,
     ): FetchResult {
         val httpUrl = url.toHttpUrlOrNull() ?: return FetchResult.Refused("not a URL")
         if (requireHttps && !httpUrl.isHttps) return FetchResult.Refused("not https")
@@ -124,8 +126,8 @@ open class FencedHttp(
                     when {
                         response.code == 200 -> {
                             val source = response.body.source()
-                            if (source.request(maxBodyBytes + 1)) {
-                                FetchResult.Refused("body over $maxBodyBytes bytes")
+                            if (source.request(maxBytes + 1)) {
+                                FetchResult.Refused("body over $maxBytes bytes")
                             } else {
                                 FetchResult.Ok(source.buffer.readUtf8())
                             }

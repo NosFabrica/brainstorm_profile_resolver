@@ -178,4 +178,17 @@ class ProfileResolverTest {
             ResolverJob(Config.Mode.INCREMENTAL, s.graph, s.store, source, s.resolver).run(startedAt = now)
             assertEquals(now - 86_400, s.store.cursorValue)
         }
+
+    @Test
+    fun aBatchWithManyNamesOnOneDomainCostsOneRequest() =
+        runTest {
+            val pubkeys = (0 until 25).map { it.toString(16).padStart(64, '0') }
+            val names = pubkeys.withIndex().joinToString(",", prefix = """{"names":{""", postfix = "}}") { (i, pk) -> "\"user$i\":\"$pk\"" }
+            val s = Setup(mapOf("https://bots.example/.well-known/nostr.json" to FetchResult.Ok(names)), pubkeys, now)
+
+            s.resolver.process(pubkeys.mapIndexed { i, pk -> profile(pk, """{"nip05":"user$i@bots.example"}""") })
+
+            assertEquals(listOf("https://bots.example/.well-known/nostr.json"), s.scripted.asked)
+            pubkeys.forEach { assertEquals(Nip05Status.VERIFIED, s.graph.users[it]!!.nip05Status) }
+        }
 }
