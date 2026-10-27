@@ -8,7 +8,9 @@ point to off-nostr, writing the answers into Brainstorm's graph:
   like a kind-10040 designation: a `ZAPS_VIA` edge every Observer's run reads, rated 0.95; an
   Observer's own signer is pinned at rank 95.
 - **NIP-05.** A profile's `nip05` is checked against the domain's `/.well-known/nostr.json`; the
-  verdict is stored on the user's node.
+  verdict is stored on the user's node. GrapeRank uses it only against the user: someone claiming a
+  name the domain gives to another key is scored zero, and a claim the domain does not back is
+  halved (brainstorm_server ADR 0006). A verified NIP-05, or none, changes nothing.
 
 It touches only users already in the graph, and looks up only what changed.
 
@@ -24,7 +26,7 @@ The other Brainstorm services depend on these names, so they are a contract.
 | `lnurl_status` | `OK`, `NO_ZAPS`, `NOT_FOUND`, `INVALID`, or `PENDING` (the domain was down; retried). |
 | `-[:ZAPS_VIA]->(:NostrUser)` | The key that signs the user's zap receipts. Present only for `OK`, and never to the user's own key. |
 | `nip05` | The user's NIP-05 identifier, lowercased. |
-| `nip05_status` | `VERIFIED`, `MISMATCH`, `NOT_FOUND`, `INVALID`, or `PENDING`. |
+| `nip05_status` | `VERIFIED`; `SUSPECTED` (the domain lists the name under another key, seen once — re-checked next run); `IMPERSONATION` (the same on two checks in a row); `NOT_LISTED` (the domain answered without the name, or a 404); `UNKNOWN` (a 403, redirect, unreadable answer or refused URL — not the user's doing); or `PENDING` (domain down). The GrapeRank worker zeroes `IMPERSONATION` and halves `NOT_LISTED` (brainstorm_server ADR 0006). |
 | `nip05_checked_at` | Epoch seconds of the last check. |
 
 **Redis:**
@@ -50,6 +52,9 @@ The other Brainstorm services depend on these names, so they are a contract.
      backs the whole domain off — 1 h, 6 h, 1 day, 3 days, then weekly — and its addresses stay
      `PENDING`. A 404 means the server is up; only that address is `NOT_FOUND`.
    - **At most one request per domain per 500 ms**, and 16 in flight overall.
+   - **A name listed under another key is only `SUSPECTED` at first**, and becomes `IMPERSONATION` when the next
+     night's check agrees. A domain that names someone else for at least 10 of a batch's checks, and at least
+     half of them, is doubted instead (`UNKNOWN`): that is a broken domain, not a crowd of impersonators.
    - **NIP-05s are re-checked monthly**: domains add and drop names. Each name is checked with
      `?name=`, the form every domain we surveyed answers. A domain with 20 or more names due in a
      batch is first asked once per run for its whole list (the bare `nostr.json`, up to 2 MB), which

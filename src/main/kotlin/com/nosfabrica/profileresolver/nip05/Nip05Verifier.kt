@@ -3,7 +3,6 @@ package com.nosfabrica.profileresolver.nip05
 import com.nosfabrica.profileresolver.http.DomainGate
 import com.nosfabrica.profileresolver.http.FencedHttp
 import com.nosfabrica.profileresolver.http.FetchResult
-import com.nosfabrica.profileresolver.store.Nip05Status
 import com.vitorpamplona.quartz.nip05DnsIdentifiers.Nip05Id
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
@@ -27,6 +26,23 @@ import java.util.concurrent.ConcurrentHashMap
  * the megabytes (the mostr bridges). So a list only ever answers names it holds; a name missing
  * from one is asked for itself.
  */
+/** What one check observed. [Nip05Check.LISTED_TO_OTHER] becomes an impersonation only once confirmed. */
+enum class Nip05Check {
+    VERIFIED,
+
+    /** The domain maps the name to a different pubkey. */
+    LISTED_TO_OTHER,
+
+    /** The domain answered without backing the claim: the name missing from its `names`, or a 404. */
+    NOT_LISTED,
+
+    /** No usable answer, and not the user's doing: another 4xx, a redirect, an unreadable body, a refused URL. */
+    UNKNOWN,
+
+    /** The domain was down or backing off. */
+    PENDING,
+}
+
 class Nip05Verifier(
     private val http: FencedHttp,
     private val gate: DomainGate,
@@ -68,20 +84,27 @@ class Nip05Verifier(
     suspend fun verify(
         id: Nip05Id,
         pubkey: String,
-    ): Nip05Status {
-        lists[id.domain]?.get(id.name)?.let { return if (it == pubkey) Nip05Status.VERIFIED else Nip05Status.MISMATCH }
+    ): Nip05Check {
+        lists[id.domain]?.get(id.name)?.let { return judge(it, pubkey) }
         return when (val result = fetch(id)) {
-            null, is FetchResult.DomainDown -> Nip05Status.PENDING
-            is FetchResult.Refused -> Nip05Status.INVALID
-            is FetchResult.AddressGone -> Nip05Status.NOT_FOUND
+            null, is FetchResult.DomainDown -> Nip05Check.PENDING
+            is FetchResult.Refused -> Nip05Check.UNKNOWN
+            // A 404 is the domain saying it has no such name; a 403, a redirect or another 4xx
+            // is more often a firewall or a misconfiguration than an answer about the user.
+            is FetchResult.AddressGone -> if (result.status == 404) Nip05Check.NOT_LISTED else Nip05Check.UNKNOWN
             is FetchResult.Ok -> {
-                val names = namesOf(result.body)
+                val names = namesOf(result.body) ?: return Nip05Check.UNKNOWN
                 // Many servers ignore `?name=` and answer with every name they hold.
-                if (names != null && names.size > 1) lists.putIfAbsent(id.domain, names)
-                if (names?.get(id.name) == pubkey) Nip05Status.VERIFIED else Nip05Status.MISMATCH
+                if (names.size > 1) lists.putIfAbsent(id.domain, names)
+                names[id.name]?.let { judge(it, pubkey) } ?: Nip05Check.NOT_LISTED
             }
         }
     }
+
+    private fun judge(
+        listed: String,
+        pubkey: String,
+    ) = if (listed == pubkey) Nip05Check.VERIFIED else Nip05Check.LISTED_TO_OTHER
 
     /** One request per name per run: the same name asked twice is answered from here. */
     private suspend fun fetch(id: Nip05Id): FetchResult? {

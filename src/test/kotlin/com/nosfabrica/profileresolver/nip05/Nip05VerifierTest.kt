@@ -4,7 +4,6 @@ import com.nosfabrica.profileresolver.FakeStore
 import com.nosfabrica.profileresolver.ScriptedHttp
 import com.nosfabrica.profileresolver.http.DomainGate
 import com.nosfabrica.profileresolver.http.FetchResult
-import com.nosfabrica.profileresolver.store.Nip05Status
 import com.vitorpamplona.quartz.nip05DnsIdentifiers.Nip05Id
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
@@ -22,7 +21,7 @@ class Nip05VerifierTest {
     private fun id(value: String) = Nip05Id.parse(value)!!
 
     @Test
-    fun verifiedMismatchAndNotFound() =
+    fun verifiedListedToOtherAndNotListed() =
         runTest {
             val (v, _) =
                 verifier(
@@ -31,9 +30,9 @@ class Nip05VerifierTest {
                         id("bob@b.example").toUserUrl() to FetchResult.Ok("""{"names":{"bob":"$alice"}}"""),
                     ),
                 )
-            assertEquals(Nip05Status.VERIFIED, v.verify(id("alice@a.example"), alice))
-            assertEquals(Nip05Status.MISMATCH, v.verify(id("bob@b.example"), bob))
-            assertEquals(Nip05Status.NOT_FOUND, v.verify(id("carol@c.example"), bob))
+            assertEquals(Nip05Check.VERIFIED, v.verify(id("alice@a.example"), alice))
+            assertEquals(Nip05Check.LISTED_TO_OTHER, v.verify(id("bob@b.example"), bob))
+            assertEquals(Nip05Check.NOT_LISTED, v.verify(id("carol@c.example"), bob))
         }
 
     @Test
@@ -41,8 +40,8 @@ class Nip05VerifierTest {
         runTest {
             val list = FetchResult.Ok("""{"names":{"alice":"$alice","bob":"$bob"}}""")
             val (v, http) = verifier(mapOf(id("alice@bots.example").toUserUrl() to list))
-            assertEquals(Nip05Status.VERIFIED, v.verify(id("alice@bots.example"), alice))
-            assertEquals(Nip05Status.VERIFIED, v.verify(id("bob@bots.example"), bob))
+            assertEquals(Nip05Check.VERIFIED, v.verify(id("alice@bots.example"), alice))
+            assertEquals(Nip05Check.VERIFIED, v.verify(id("bob@bots.example"), bob))
             assertEquals(1, http.asked.size)
         }
 
@@ -53,7 +52,7 @@ class Nip05VerifierTest {
             val carol = FetchResult.Ok("""{"names":{"carol":"$bob"}}""")
             val (v, http) = verifier(mapOf(id("alice@d.example").toUserUrl() to list, id("carol@d.example").toUserUrl() to carol))
             v.verify(id("alice@d.example"), alice)
-            assertEquals(Nip05Status.VERIFIED, v.verify(id("carol@d.example"), bob))
+            assertEquals(Nip05Check.VERIFIED, v.verify(id("carol@d.example"), bob))
             assertEquals(2, http.asked.size)
         }
 
@@ -61,7 +60,7 @@ class Nip05VerifierTest {
     fun aDownDomainIsPending() =
         runTest {
             val (v, _) = verifier(mapOf(id("alice@e.example").toUserUrl() to FetchResult.DomainDown("timeout")))
-            assertEquals(Nip05Status.PENDING, v.verify(id("alice@e.example"), alice))
+            assertEquals(Nip05Check.PENDING, v.verify(id("alice@e.example"), alice))
         }
 
     private fun hex(i: Int) = i.toString(16).padStart(64, '0')
@@ -82,7 +81,7 @@ class Nip05VerifierTest {
             val (v, http) = verifier(mapOf(bare to FetchResult.Ok(namesJson(users))))
 
             v.prefetch(users.map { it.first })
-            users.forEach { (id, pk) -> assertEquals(Nip05Status.VERIFIED, v.verify(id, pk)) }
+            users.forEach { (id, pk) -> assertEquals(Nip05Check.VERIFIED, v.verify(id, pk)) }
 
             assertEquals(listOf(bare), http.asked)
             assertEquals(2L * 1024 * 1024, http.maxBytesAsked[bare], "the list gets the larger cap")
@@ -95,7 +94,7 @@ class Nip05VerifierTest {
             val (v, http) = verifier(users.associate { (id, pk) -> id.toUserUrl() to FetchResult.Ok(namesJson(listOf(id to pk))) })
 
             v.prefetch(users.map { it.first })
-            users.forEach { (id, pk) -> assertEquals(Nip05Status.VERIFIED, v.verify(id, pk)) }
+            users.forEach { (id, pk) -> assertEquals(Nip05Check.VERIFIED, v.verify(id, pk)) }
 
             assertEquals(19, http.asked.size)
             assertEquals(false, Nip05Id.domainUrl("quiet.example") in http.asked)
@@ -111,7 +110,7 @@ class Nip05VerifierTest {
                 val (v, http) = verifier(answers)
 
                 v.prefetch(users.map { it.first })
-                users.forEach { (id, pk) -> assertEquals(Nip05Status.VERIFIED, v.verify(id, pk), "after $bareAnswer") }
+                users.forEach { (id, pk) -> assertEquals(Nip05Check.VERIFIED, v.verify(id, pk), "after $bareAnswer") }
                 assertEquals(21, http.asked.size, "one list request, then one per name, after $bareAnswer")
             }
         }
@@ -130,7 +129,7 @@ class Nip05VerifierTest {
             val (v, http) = verifier(answers)
 
             v.prefetch(users.map { it.first })
-            users.forEach { (id, pk) -> assertEquals(Nip05Status.VERIFIED, v.verify(id, pk)) }
+            users.forEach { (id, pk) -> assertEquals(Nip05Check.VERIFIED, v.verify(id, pk)) }
             assertEquals(listOf(Nip05Id.domainUrl("partial.example"), missing.first.toUserUrl()), http.asked)
         }
 
@@ -145,11 +144,39 @@ class Nip05VerifierTest {
         }
 
     @Test
-    fun aListedNameWithAnotherKeyIsAMismatch() =
+    fun aListedNameWithAnotherKeyIsListedToOther() =
         runTest {
             val users = usersOn("other.example", 20)
             val (v, _) = verifier(mapOf(Nip05Id.domainUrl("other.example") to FetchResult.Ok(namesJson(users))))
             v.prefetch(users.map { it.first })
-            assertEquals(Nip05Status.MISMATCH, v.verify(users[0].first, hex(999)))
+            assertEquals(Nip05Check.LISTED_TO_OTHER, v.verify(users[0].first, hex(999)))
+        }
+
+    @Test
+    fun onlyA404OrAMissingNameIsNotListed() =
+        runTest {
+            val gone = id("gone@f.example")
+            val blocked = id("blocked@g.example")
+            val moved = id("moved@h.example")
+            val missing = id("missing@i.example")
+            val garbage = id("garbage@j.example")
+            val refused = id("refused@k.example")
+            val (v, _) =
+                verifier(
+                    mapOf(
+                        gone.toUserUrl() to FetchResult.AddressGone(404),
+                        blocked.toUserUrl() to FetchResult.AddressGone(403),
+                        moved.toUserUrl() to FetchResult.AddressGone(301),
+                        missing.toUserUrl() to FetchResult.Ok("""{"names":{}}"""),
+                        garbage.toUserUrl() to FetchResult.Ok("<html>"),
+                        refused.toUserUrl() to FetchResult.Refused("non-public host"),
+                    ),
+                )
+            assertEquals(Nip05Check.NOT_LISTED, v.verify(gone, alice))
+            assertEquals(Nip05Check.NOT_LISTED, v.verify(missing, alice))
+            assertEquals(Nip05Check.UNKNOWN, v.verify(blocked, alice), "a 403 is usually a firewall")
+            assertEquals(Nip05Check.UNKNOWN, v.verify(moved, alice), "a redirect is a misconfiguration")
+            assertEquals(Nip05Check.UNKNOWN, v.verify(garbage, alice))
+            assertEquals(Nip05Check.UNKNOWN, v.verify(refused, alice))
         }
 }

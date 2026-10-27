@@ -1,18 +1,21 @@
 package com.nosfabrica.profileresolver
 
 import com.nosfabrica.profileresolver.lightning.LightningResolver
+import com.nosfabrica.profileresolver.nip05.Nip05Check
 import com.nosfabrica.profileresolver.nip05.Nip05Verifier
 import com.nosfabrica.profileresolver.profiles.ProfileFields
 import com.nosfabrica.profileresolver.store.GraphStore
 import com.nosfabrica.profileresolver.store.KeyValueStore
 import com.nosfabrica.profileresolver.store.LightningWrite
 import com.nosfabrica.profileresolver.store.LnStatus
+import com.nosfabrica.profileresolver.store.Nip05Status
 import com.nosfabrica.profileresolver.store.Nip05Write
 import com.nosfabrica.profileresolver.store.UserState
 import com.vitorpamplona.quartz.nip05DnsIdentifiers.Nip05Id
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import org.slf4j.LoggerFactory
 
 /** Counts for the run's log line. */
 data class Tally(
@@ -22,10 +25,13 @@ data class Tally(
     var lightningCleared: Int = 0,
     var nip05Checked: Int = 0,
     var nip05Cleared: Int = 0,
+    var nip05Impersonations: Int = 0,
+    var nip05DomainsDoubted: Int = 0,
 ) {
     override fun toString() =
         "profiles=$profiles notInGraph=$notInGraph lightningResolved=$lightningResolved " +
-            "lightningCleared=$lightningCleared nip05Checked=$nip05Checked nip05Cleared=$nip05Cleared"
+            "lightningCleared=$lightningCleared nip05Checked=$nip05Checked nip05Cleared=$nip05Cleared " +
+            "nip05Impersonations=$nip05Impersonations nip05DomainsDoubted=$nip05DomainsDoubted"
 }
 
 /**
@@ -42,7 +48,13 @@ class ProfileResolver(
     private val nip05: Nip05Verifier,
     private val nip05RecheckSeconds: Long,
     private val nowSeconds: () -> Long = { System.currentTimeMillis() / 1000 },
+    /** A domain with at least this many "listed to another key" answers in a batch... */
+    private val doubtMinimum: Int = 10,
+    /** ...making up at least this share of its checks there, is doubted rather than believed. */
+    private val doubtShare: Double = 0.5,
 ) {
+    private val log = LoggerFactory.getLogger(ProfileResolver::class.java)
+
     val tally = Tally()
 
     /** One batch of profiles, newest per author kept. */
@@ -64,21 +76,21 @@ class ProfileResolver(
                     }
                 }
             val nip05Cleared = mutableListOf<Nip05Write>()
-            val toVerify = mutableListOf<Pair<String, Nip05Id>>()
+            val toVerify = mutableListOf<Pair<UserState, Nip05Id>>()
             for (user in users.values) {
                 val wanted = latest.getValue(user.pubkey).nip05
                 when {
                     wanted == null && user.nip05 == null -> {}
                     wanted == null -> nip05Cleared += Nip05Write(user.pubkey, null, null, null)
                     wanted.toValue() == user.nip05 && !nip05Due(user) -> {}
-                    else -> toVerify += user.pubkey to wanted
+                    else -> toVerify += user to wanted
                 }
             }
             // A domain with many names in this batch may answer them all with one list.
             nip05.prefetch(toVerify.map { it.second })
-            val nip05Jobs = toVerify.map { (pubkey, id) -> async { verifyNip05(pubkey, id) } }
+            val nip05Jobs = toVerify.map { (user, id) -> async { id to nip05.verify(id, user.pubkey) } }
             writeLightning(lightningJobs.awaitAll())
-            writeNip05(nip05Cleared + nip05Jobs.awaitAll())
+            writeNip05(nip05Cleared + settle(toVerify.map { it.first }.zip(nip05Jobs.awaitAll())))
         }
     }
 
@@ -99,9 +111,10 @@ class ProfileResolver(
             val page = graph.nip05Due(checkedBefore, after, pageSize)
             if (page.isEmpty()) break
             coroutineScope {
-                val due = page.mapNotNull { user -> user.nip05?.let { Nip05Id.parse(it) }?.let { user.pubkey to it } }
+                val due = page.mapNotNull { user -> user.nip05?.let { Nip05Id.parse(it) }?.let { user to it } }
                 nip05.prefetch(due.map { it.second })
-                writeNip05(due.map { (pubkey, id) -> async { verifyNip05(pubkey, id) } }.awaitAll())
+                val checks = due.map { (user, id) -> async { id to nip05.verify(id, user.pubkey) } }.awaitAll()
+                writeNip05(settle(due.map { it.first }.zip(checks)))
             }
             after = page.last().pubkey
         }
@@ -117,12 +130,44 @@ class ProfileResolver(
         return LightningWrite(pubkey, lnurl, answer.status, signer)
     }
 
-    private suspend fun verifyNip05(
-        pubkey: String,
-        id: Nip05Id,
-    ): Nip05Write {
-        val status = nip05.verify(id, pubkey)
-        return Nip05Write(pubkey, id.toValue(), status, nowSeconds())
+    /**
+     * Checks into statuses. A name listed to another key is only [Nip05Status.SUSPECTED] the first
+     * time, and becomes [Nip05Status.IMPERSONATION] when the next check agrees — one bad answer
+     * from a domain must not zero anyone. A domain answering "someone else's" for many of its
+     * names at once is doubted instead: that is a domain fault, not a crowd of impersonators.
+     */
+    private fun settle(checks: List<Pair<UserState, Pair<Nip05Id, Nip05Check>>>): List<Nip05Write> {
+        val doubted =
+            checks
+                .groupBy({ it.second.first.domain }, { it.second.second })
+                .filterValues { results ->
+                    val others = results.count { it == Nip05Check.LISTED_TO_OTHER }
+                    others >= doubtMinimum && others >= doubtShare * results.size
+                }.keys
+        doubted.forEach { log.warn("NIP-05 domain {} named someone else for most of its names in one batch; not penalising them", it) }
+        tally.nip05DomainsDoubted += doubted.size
+
+        val now = nowSeconds()
+        return checks.map { (user, check) ->
+            val (id, result) = check
+            val status =
+                when (result) {
+                    Nip05Check.VERIFIED -> Nip05Status.VERIFIED
+                    Nip05Check.NOT_LISTED -> Nip05Status.NOT_LISTED
+                    Nip05Check.UNKNOWN -> Nip05Status.UNKNOWN
+                    Nip05Check.PENDING -> Nip05Status.PENDING
+                    Nip05Check.LISTED_TO_OTHER ->
+                        when {
+                            id.domain in doubted -> Nip05Status.UNKNOWN
+                            user.nip05 == id.toValue() &&
+                                (user.nip05Status == Nip05Status.SUSPECTED || user.nip05Status == Nip05Status.IMPERSONATION) ->
+                                Nip05Status.IMPERSONATION
+                            else -> Nip05Status.SUSPECTED
+                        }
+                }
+            if (status == Nip05Status.IMPERSONATION) tally.nip05Impersonations++
+            Nip05Write(user.pubkey, id.toValue(), status, now)
+        }
     }
 
     /** Pending, or settled longer ago than the re-check window: domains add and drop names. */

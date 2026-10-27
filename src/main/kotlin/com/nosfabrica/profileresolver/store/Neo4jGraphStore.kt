@@ -68,7 +68,7 @@ class Neo4jGraphStore(
         read(
             """
             MATCH (u:NostrUser) WHERE u.nip05 IS NOT NULL AND u.pubkey > ${'$'}after
-              AND (u.nip05_status = 'PENDING' OR u.nip05_checked_at < ${'$'}checkedBefore)
+              AND (u.nip05_status IN ['PENDING', 'SUSPECTED'] OR u.nip05_checked_at < ${'$'}checkedBefore)
             RETURN u.pubkey AS pubkey, u.lnurl AS lnurl, u.lnurl_status AS lnurl_status,
                    u.nip05 AS nip05, u.nip05_status AS nip05_status, u.nip05_checked_at AS nip05_checked_at
             ORDER BY u.pubkey LIMIT ${'$'}limit

@@ -77,7 +77,7 @@ class FakeGraph(
         after: String,
         limit: Int,
     ) = users.values
-        .filter { it.nip05 != null && it.pubkey > after && (it.nip05Status == Nip05Status.PENDING || (it.nip05CheckedAt ?: 0) < checkedBefore) }
+        .filter { it.nip05 != null && it.pubkey > after && (it.nip05Status == Nip05Status.PENDING || it.nip05Status == Nip05Status.SUSPECTED || (it.nip05CheckedAt ?: 0) < checkedBefore) }
         .sortedBy { it.pubkey }
         .take(limit)
 

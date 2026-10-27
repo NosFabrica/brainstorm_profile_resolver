@@ -191,4 +191,62 @@ class ProfileResolverTest {
             assertEquals(listOf("https://bots.example/.well-known/nostr.json"), s.scripted.asked)
             pubkeys.forEach { assertEquals(Nip05Status.VERIFIED, s.graph.users[it]!!.nip05Status) }
         }
+
+    private fun names(vararg entries: Pair<String, String>) =
+        FetchResult.Ok(entries.joinToString(",", prefix = """{"names":{""", postfix = "}}") { (n, pk) -> "\"$n\":\"$pk\"" })
+
+    @Test
+    fun aNameListedToSomeoneElseIsSuspectedThenConfirmed() =
+        runTest {
+            val url = "https://example.com/.well-known/nostr.json?name=jack"
+            val s = Setup(mapOf(url to names("jack" to alice)), listOf(bob), now)
+            val p = profile(bob, """{"nip05":"jack@example.com"}""")
+
+            s.resolver.process(listOf(p))
+            assertEquals(Nip05Status.SUSPECTED, s.graph.users[bob]!!.nip05Status, "one answer is not enough")
+
+            // The next night: SUSPECTED is not final, so the retry pass checks it again.
+            val next = Setup(mapOf(url to names("jack" to alice)), emptyList(), now + 86_400)
+            next.graph.users.putAll(s.graph.users)
+            next.resolver.retryDue()
+            assertEquals(Nip05Status.IMPERSONATION, next.graph.users[bob]!!.nip05Status)
+            assertEquals(1, next.resolver.tally.nip05Impersonations)
+        }
+
+    @Test
+    fun aSuspicionTheNextCheckContradictsIsCleared() =
+        runTest {
+            val url = "https://example.com/.well-known/nostr.json?name=jack"
+            val s = Setup(mapOf(url to names("jack" to alice)), listOf(bob), now)
+            s.resolver.process(listOf(profile(bob, """{"nip05":"jack@example.com"}""")))
+
+            val next = Setup(mapOf(url to names("jack" to bob)), emptyList(), now + 86_400)
+            next.graph.users.putAll(s.graph.users)
+            next.resolver.retryDue()
+            assertEquals(Nip05Status.VERIFIED, next.graph.users[bob]!!.nip05Status)
+        }
+
+    @Test
+    fun aSuspicionOnAnotherNameDoesNotConfirm() =
+        runTest {
+            val jack = "https://example.com/.well-known/nostr.json?name=jack"
+            val dorsey = "https://example.com/.well-known/nostr.json?name=dorsey"
+            val s = Setup(mapOf(jack to names("jack" to alice), dorsey to names("dorsey" to alice)), listOf(bob), now)
+            s.resolver.process(listOf(profile(bob, """{"nip05":"jack@example.com"}""", createdAt = 1)))
+            s.resolver.process(listOf(profile(bob, """{"nip05":"dorsey@example.com"}""", createdAt = 2)))
+            assertEquals(Nip05Status.SUSPECTED, s.graph.users[bob]!!.nip05Status)
+        }
+
+    @Test
+    fun aDomainNamingSomeoneElseForMostOfItsNamesIsDoubted() =
+        runTest {
+            val pubkeys = (0 until 12).map { (it + 100).toString(16).padStart(64, '0') }
+            // The domain maps every name to one wrong key: a broken domain, not 12 impersonators.
+            val answers = pubkeys.indices.associate { "https://broken.example/.well-known/nostr.json?name=user$it" to names("user$it" to alice) }
+            val s = Setup(answers, pubkeys, now)
+            s.resolver.process(pubkeys.mapIndexed { i, pk -> profile(pk, """{"nip05":"user$i@broken.example"}""") })
+
+            pubkeys.forEach { assertEquals(Nip05Status.UNKNOWN, s.graph.users[it]!!.nip05Status) }
+            assertEquals(1, s.resolver.tally.nip05DomainsDoubted)
+        }
 }

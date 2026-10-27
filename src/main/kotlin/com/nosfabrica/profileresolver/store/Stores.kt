@@ -34,20 +34,32 @@ enum class LnStatus {
     val isFinal get() = this != PENDING
 }
 
+/**
+ * What a NIP-05 check found. Facts only: the GrapeRank worker decides what each costs
+ * (brainstorm_server ADR 0006 — `IMPERSONATION` zeroes a score, `NOT_LISTED` halves it).
+ */
 enum class Nip05Status {
+    /** The domain maps the name to this pubkey. */
     VERIFIED,
 
-    /** The domain's `names` does not map this name to this pubkey. */
-    MISMATCH,
+    /** The domain maps the name to a different pubkey, seen once. Re-checked next run before it counts. */
+    SUSPECTED,
 
-    /** The server is up and has no `nostr.json` for this name. */
-    NOT_FOUND,
+    /** The domain maps the name to a different pubkey, on two checks in a row: someone else's name. */
+    IMPERSONATION,
 
-    INVALID,
+    /** The domain answered but does not back the claim: the name is missing from its list, or a 404. */
+    NOT_LISTED,
+
+    /** No usable answer, and not the user's doing: a 403, a redirect, an unreadable body, a refused URL. */
+    UNKNOWN,
+
+    /** The domain was down or backing off. Retried. */
     PENDING,
     ;
 
-    val isFinal get() = this != PENDING
+    /** Settled until the monthly re-check. `SUSPECTED` is not: it is confirmed or cleared next run. */
+    val isFinal get() = this != PENDING && this != SUSPECTED
 }
 
 /** The small, fast state: Redis in production. */
