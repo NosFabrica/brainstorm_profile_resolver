@@ -46,7 +46,7 @@ The other Brainstorm services depend on these names, so they are a contract.
    first run, with `RESOLVER_MODE=FULL`, and weekly (`FULL_PASS_EVERY_DAYS`), since a user who
    joins the graph with an old profile shows up in no incremental walk. A full pass that outlives
    its run resumes where it stopped. Other runs read only profiles changed since the cursor (minus
-   an hour of overlap), paged newest-first with Quartz's `fetchAllPages`, newest per author kept. Reads are unranked
+   an hour of overlap), paged newest-first with Quartz's `fetchAllPagesResuming`, which carries on from where it got to when the connection drops, newest per author kept. Reads are unranked
    (`include:spam`) — lookups, not searches. No signature checks: we run the relay and it verifies
    what it stores. The cursor advances only when the relay drained the window.
 2. **Lookups.** For each graph user whose address or NIP-05 changed:

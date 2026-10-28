@@ -11,7 +11,7 @@ tables are a contract with `brainstorm_server` and `brainstorm_graperank_algorit
 | `Main.kt` | Wires the stores, the relay client and the resolvers; one run, then exit. |
 | `ResolverJob.kt` | One run: full or incremental profile pass, then retries. Owns the cursor. |
 | `ProfileResolver.kt` | Per batch: skip the unchanged, resolve the rest, write. |
-| `profiles/` | `ProfileFields` (lud16/lud06/nip05 from a kind-0) and `SearchRelayProfiles` (Quartz `fetchAllPages`). |
+| `profiles/` | `ProfileFields` (lud16/lud06/nip05 from a kind-0) and `SearchRelayProfiles` (Quartz `fetchAllPagesResuming`). |
 | `http/FencedHttp.kt` | The only outbound GET to user-supplied hosts. Classifies every outcome. |
 | `http/DomainGate.kt` | Per-domain spacing, global concurrency, and backoff for domains that are down. |
 | `lightning/`, `nip05/` | The two lookups. |

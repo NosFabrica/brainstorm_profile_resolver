@@ -4,7 +4,7 @@ import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.relay.client.INostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.client.NostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.PagedFetchResult
-import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.fetchAllPages
+import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.fetchAllPagesResuming
 import com.vitorpamplona.quartz.nip01Core.relay.filters.Filter
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
 import com.vitorpamplona.quartz.nip01Core.relay.sockets.okhttp.BasicOkHttpWebSocket
@@ -29,7 +29,9 @@ interface ProfileSource {
 /**
  * Our search relay over a websocket, with Quartz's paging. Reads are unranked
  * (`include:spam`): these are lookups, not searches, and without a ranking observer the relay
- * refuses anonymous reads. An extension-only search pages newest first, so Quartz walks it.
+ * refuses anonymous reads. An extension-only search pages newest first, so Quartz walks it, and
+ * resumes the walk from where it got to when the connection drops or a page goes silent, instead
+ * of ending it (and leaving the cursor to re-read the whole window next night).
  * No signature checks — we run this relay, and it verifies what it stores.
  */
 class SearchRelayProfiles(
@@ -43,7 +45,7 @@ class SearchRelayProfiles(
     override suspend fun changedSince(since: Long): ProfileSource.Changed {
         val profiles = mutableListOf<ProfileFields>()
         val result =
-            client.fetchAllPages(
+            client.fetchAllPagesResuming(
                 relay = relay,
                 filters = listOf(Filter(kinds = listOf(0), since = since, search = UNRANKED)),
                 pageSize = pageSize,
@@ -54,7 +56,7 @@ class SearchRelayProfiles(
     override suspend fun byAuthors(pubkeys: List<String>): List<ProfileFields> {
         if (pubkeys.isEmpty()) return emptyList()
         val profiles = mutableListOf<ProfileFields>()
-        client.fetchAllPages(
+        client.fetchAllPagesResuming(
             relay = relay,
             filters = listOf(Filter(kinds = listOf(0), authors = pubkeys, search = UNRANKED)),
             pageSize = pageSize,
