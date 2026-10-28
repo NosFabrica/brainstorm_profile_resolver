@@ -77,10 +77,12 @@ a crash between the two leaves the user unsettled and the next run writes both a
 ## The outbound fetch
 
 Addresses come from profiles anyone can write, so every GET is fenced: https on port 443 only, no
-redirects, a 64 KB body cap, and hosts that resolve only to public addresses — an IP-literal host
-is checked directly, since OkHttp never asks the DNS about one. OkHttp connects to exactly
-the addresses the fence approved, so a host cannot pass the check and then rebind to an internal
-address. The client never uses a proxy, which would bypass that check.
+redirects, a 64 KB body cap, and hosts that resolve only to public addresses. The address fence is
+Quartz's `publicAddressesOnly(direct = true)` (2.6.0+): host names resolve only when every
+address is public, and OkHttp connects to exactly those, so a host cannot pass the check and then
+rebind to an internal address; IP-literal hosts, which OkHttp never sends to the resolver, are
+checked on their own; and the client never uses a proxy, which would bypass the check.
+`FencedHttp` turns each outcome into what the resolvers act on (down, gone, refused, a 5xx).
 
 ## Running
 

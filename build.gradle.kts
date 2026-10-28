@@ -15,7 +15,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.vitorpamplona.quartz:quartz:2.4.0")
+    implementation("com.vitorpamplona.quartz:quartz:2.6.0")
     // Quartz ships these as runtime-only; we compile against them.
     implementation("com.squareup.okhttp3:okhttp:5.5.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")

@@ -4,6 +4,9 @@ import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import okhttp3.Dns
+import okhttp3.OkHttpClient
+import java.net.Proxy
+import java.net.UnknownHostException
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -13,14 +16,17 @@ import kotlin.test.assertIs
 class FencedHttpTest {
     private val server = MockWebServer()
 
-    // Loopback, plain http and any port are allowed here only so the test can reach its own server.
+    // No address fence, plain http and any port, only so the test can reach its own server.
     private val http =
         FencedHttp(
-            FencedHttp.defaultClient(PublicOnlyDns { true }),
+            OkHttpClient
+                .Builder()
+                .proxy(Proxy.NO_PROXY)
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .build(),
             requireHttps = false,
             maxBodyBytes = 100,
-            allowedPorts = null,
-            addressAllowed = { true },
         )
 
     @BeforeTest
@@ -83,21 +89,21 @@ class FencedHttpTest {
         runTest {
             val fenced = FencedHttp()
             assertIs<FetchResult.Refused>(fenced.get(url()))
-            assertIs<FetchResult.Refused>(FencedHttp(FencedHttp.defaultClient(), requireHttps = false, allowedPorts = null).get(url()))
+            assertIs<FetchResult.Refused>(FencedHttp(FencedHttp.defaultClient(allowedPorts = null), requireHttps = false).get(url()))
             assertEquals(0, server.requestCount)
         }
 
     @Test
     fun onlyTheHttpsPortIsAllowed() =
         runTest {
-            assertEquals(FetchResult.Refused("port 8443"), FencedHttp().get("https://example.com:8443/x"))
+            assertIs<FetchResult.Refused>(FencedHttp().get("https://example.com:8443/x"))
         }
 
     @Test
     fun anUnreachableHostMeansTheDomainIsDown() =
         runTest {
             val failing =
-                FencedHttp(FencedHttp.defaultClient(Dns { throw java.net.UnknownHostException(it) }), requireHttps = false, allowedPorts = null)
+                FencedHttp(FencedHttp.defaultClient(dns = Dns { throw UnknownHostException(it) }, allowedPorts = null), requireHttps = false)
             assertIs<FetchResult.DomainDown>(failing.get("http://nowhere.example/x"))
         }
 
@@ -107,7 +113,7 @@ class FencedHttpTest {
             // Regression: OkHttp never asks the Dns for an IP-literal host, so the fence must
             // check those itself. The server is up; the fetch must still be refused.
             server.enqueue(MockResponse.Builder().body("{}").build())
-            val fenced = FencedHttp(FencedHttp.defaultClient(), requireHttps = false, allowedPorts = null)
+            val fenced = FencedHttp(FencedHttp.defaultClient(allowedPorts = null), requireHttps = false)
             assertIs<FetchResult.Refused>(fenced.get(server.url("/x").toString().replace("localhost", "127.0.0.1")))
             assertIs<FetchResult.Refused>(FencedHttp().get("https://[::1]/x"))
             assertIs<FetchResult.Refused>(FencedHttp().get("https://169.254.169.254/latest"))

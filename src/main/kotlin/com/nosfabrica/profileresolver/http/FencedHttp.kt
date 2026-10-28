@@ -1,5 +1,7 @@
 package com.nosfabrica.profileresolver.http
 
+import com.vitorpamplona.quartz.utils.okhttp.NonPublicAddressException
+import com.vitorpamplona.quartz.utils.okhttp.publicAddressesOnly
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Dns
@@ -7,11 +9,6 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
-import java.net.Inet4Address
-import java.net.Inet6Address
-import java.net.InetAddress
-import java.net.Proxy
-import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
 /** What one GET came to, in the terms the resolvers act on. */
@@ -45,74 +42,18 @@ sealed interface FetchResult {
     ) : FetchResult
 }
 
-/** Thrown by [PublicOnlyDns]: the host resolves, but not to anything we may connect to. */
-class NonPublicHostException(
-    host: String,
-) : UnknownHostException("$host resolves to no public address")
-
 /**
- * Resolves only to public addresses, and OkHttp connects to exactly what this returns —
- * so a host cannot pass the check and then rebind to an internal address.
- */
-class PublicOnlyDns(
-    private val allowed: (InetAddress) -> Boolean = PublicAddress::isPublic,
-) : Dns {
-    override fun lookup(hostname: String): List<InetAddress> {
-        val addresses = Dns.SYSTEM.lookup(hostname)
-        if (addresses.any { !allowed(it) }) throw NonPublicHostException(hostname)
-        return addresses
-    }
-}
-
-object PublicAddress {
-    fun isPublic(address: InetAddress): Boolean {
-        if (address.isAnyLocalAddress || address.isLoopbackAddress || address.isLinkLocalAddress ||
-            address.isSiteLocalAddress || address.isMulticastAddress
-        ) {
-            return false
-        }
-        val b = address.address.map { it.toInt() and 0xff }
-        return when (address) {
-            is Inet4Address -> isPublicV4(b)
-            is Inet6Address -> isPublicV6(b)
-            else -> false
-        }
-    }
-
-    private fun isPublicV4(b: List<Int>): Boolean =
-        !(
-            b[0] == 0 || // "this" network
-                (b[0] == 100 && b[1] in 64..127) || // carrier-grade NAT
-                (b[0] == 192 && b[1] == 0 && b[2] == 0) || // IETF protocol assignments
-                (b[0] == 192 && b[1] == 0 && b[2] == 2) || // documentation
-                (b[0] == 198 && b[1] in 18..19) || // benchmarking
-                (b[0] == 198 && b[1] == 51 && b[2] == 100) || // documentation
-                (b[0] == 203 && b[1] == 0 && b[2] == 113) || // documentation
-                b[0] >= 240 // reserved and broadcast
-        )
-
-    private fun isPublicV6(b: List<Int>): Boolean {
-        if (b[0] and 0xfe == 0xfc) return false // unique local fc00::/7
-        if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8) return false // documentation
-        // IPv4-mapped (::ffff:a.b.c.d) and NAT64 (64:ff9b::a.b.c.d) carry an IPv4 address.
-        val mapped = (0..9).all { b[it] == 0 } && b[10] == 0xff && b[11] == 0xff
-        val nat64 = b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b && (4..11).all { b[it] == 0 }
-        if (mapped || nat64) return isPublic(InetAddress.getByAddress(b.takeLast(4).map { it.toByte() }.toByteArray()))
-        return true
-    }
-}
-
-/**
- * GETs URLs that come from profiles anyone can write: https only, public hosts only,
+ * GETs URLs that come from profiles anyone can write: https only, public hosts on port 443 only,
  * no redirects, a capped body. Every failure is classified, never thrown.
+ *
+ * The address fence is Quartz's `publicAddressesOnly` on [defaultClient]: host names resolve
+ * only to public addresses, OkHttp connects to exactly those, and IP-literal hosts (which OkHttp
+ * never sends to the resolver) are checked on their own.
  */
 open class FencedHttp(
     private val client: OkHttpClient = defaultClient(),
     private val requireHttps: Boolean = true,
     private val maxBodyBytes: Long = 64 * 1024,
-    /** LNURL and NIP-05 live on the default https port; null allows any (tests only). */
-    private val allowedPorts: Set<Int>? = setOf(443),
-    private val addressAllowed: (InetAddress) -> Boolean = PublicAddress::isPublic,
 ) {
     open suspend fun get(
         url: String,
@@ -123,9 +64,6 @@ open class FencedHttp(
         val httpUrl = url.toHttpUrlOrNull() ?: return FetchResult.Refused("not a URL")
         if (requireHttps && !httpUrl.isHttps) return FetchResult.Refused("not https")
         if (httpUrl.username.isNotEmpty() || httpUrl.password.isNotEmpty()) return FetchResult.Refused("credentials in URL")
-        if (allowedPorts != null && httpUrl.port !in allowedPorts) return FetchResult.Refused("port ${httpUrl.port}")
-        // OkHttp never asks the Dns about an IP-literal host, so PublicOnlyDns can't fence those.
-        ipLiteral(httpUrl.host)?.let { if (!addressAllowed(it)) return FetchResult.Refused("non-public address ${httpUrl.host}") }
 
         val request =
             Request
@@ -151,8 +89,8 @@ open class FencedHttp(
                         else -> FetchResult.AddressGone(response.code)
                     }
                 }
-            } catch (e: NonPublicHostException) {
-                FetchResult.Refused(e.message ?: "non-public host")
+            } catch (e: NonPublicAddressException) {
+                FetchResult.Refused(e.message ?: "non-public address")
             } catch (e: IOException) {
                 FetchResult.DomainDown(e.javaClass.simpleName + ": " + e.message)
             }
@@ -160,31 +98,20 @@ open class FencedHttp(
     }
 
     companion object {
-        private val IPV4_LITERAL = Regex("^[0-9.]+$")
-
-        /** The address an IP-literal host names, without any DNS; null for a hostname. */
-        fun ipLiteral(host: String): InetAddress? =
-            if (host.contains(':') || IPV4_LITERAL.matches(host)) {
-                try {
-                    InetAddress.getByName(host)
-                } catch (e: Exception) {
-                    null
-                }
-            } else {
-                null
-            }
-
         const val USER_AGENT = "brainstorm-profile-resolver (+https://brainstorm.world)"
 
-        fun defaultClient(dns: Dns = PublicOnlyDns()): OkHttpClient =
+        /**
+         * Public addresses only, port 443 only, no proxy (through one only the proxy would be
+         * resolved, and the target would go unchecked), no redirects. [allowedPorts] null and
+         * [dns] are for tests.
+         */
+        fun defaultClient(
+            dns: Dns = Dns.SYSTEM,
+            allowedPorts: Set<Int>? = setOf(443),
+        ): OkHttpClient =
             OkHttpClient
                 .Builder()
-                // Direct only: through a proxy OkHttp resolves the proxy, never the target,
-                // and the public-address check would be skipped.
-                .proxy(Proxy.NO_PROXY)
-                .dns(dns)
-                .followRedirects(false)
-                .followSslRedirects(false)
+                .publicAddressesOnly(direct = true, allowedPorts = allowedPorts, dns = dns)
                 .connectTimeout(5, TimeUnit.SECONDS)
                 .readTimeout(5, TimeUnit.SECONDS)
                 .callTimeout(10, TimeUnit.SECONDS)

@@ -7,11 +7,8 @@ import com.nosfabrica.profileresolver.http.domainOf
 import com.nosfabrica.profileresolver.store.AddressAnswer
 import com.nosfabrica.profileresolver.store.KeyValueStore
 import com.nosfabrica.profileresolver.store.LnStatus
+import com.vitorpamplona.quartz.nip57Zaps.validate.LnurlEndpointInfo
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.booleanOrNull
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -67,21 +64,7 @@ class LightningResolver(
     ) = AddressAnswer(status, signer, nowSeconds())
 
     companion object {
-        private val HEX_PUBKEY = Regex("^[0-9a-f]{64}$")
-
-        /** `nostrPubkey` from an LNURL-pay answer that `allowsNostr`, or null. */
-        fun parse(body: String): String? {
-            val json =
-                try {
-                    Json.parseToJsonElement(body) as? JsonObject
-                } catch (e: Exception) {
-                    null
-                } ?: return null
-            // A JSON `true`, not the string "true" (which booleanOrNull alone would accept).
-            val allowsNostr = json["allowsNostr"] as? JsonPrimitive
-            if (allowsNostr == null || allowsNostr.isString || allowsNostr.booleanOrNull != true) return null
-            val key = (json["nostrPubkey"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.lowercase() ?: return null
-            return key.takeIf { HEX_PUBKEY.matches(it) }
-        }
+        /** The zap signer an LNURL-pay answer names: `nostrPubkey` when it `allowsNostr`, else null. */
+        fun parse(body: String): String? = LnurlEndpointInfo.parse(body)?.takeIf { it.allowsNostr }?.nostrPubkey
     }
 }
