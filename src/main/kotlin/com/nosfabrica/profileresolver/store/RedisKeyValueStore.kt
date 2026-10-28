@@ -9,7 +9,9 @@ import java.security.MessageDigest
  *   the GrapeRank worker reads, beside `designates:<pubkey>`.
  * - `lnurl:<sha256(url)>` — HASH of an address's answer, so it is fetched once.
  * - `resolver_domain:<domain>` — HASH of a domain's failures and when to ask it again.
- * - `profile_resolver:cursor` — when the last complete incremental pass started.
+ * - `profile_resolver:cursor` — when the last complete pass started.
+ * - `profile_resolver:full_pass` — HASH of an unfinished full pass (`started_at`, `after`).
+ * - `profile_resolver:last_full_pass` — when the last finished full pass started.
  */
 class RedisKeyValueStore(
     private val pool: JedisPool,
@@ -68,6 +70,29 @@ class RedisKeyValueStore(
         pool.resource.use { it.set(CURSOR_KEY, epochSeconds.toString()) }
     }
 
+    override fun fullPass(): FullPass? =
+        pool.resource.use { redis ->
+            val h = redis.hgetAll(FULL_PASS_KEY)
+            val startedAt = h["started_at"]?.toLongOrNull() ?: return null
+            FullPass(startedAt, h["after"] ?: "")
+        }
+
+    override fun putFullPass(pass: FullPass?) {
+        pool.resource.use { redis ->
+            if (pass == null) {
+                redis.del(FULL_PASS_KEY)
+            } else {
+                redis.hset(FULL_PASS_KEY, mapOf("started_at" to pass.startedAt.toString(), "after" to pass.after))
+            }
+        }
+    }
+
+    override fun lastFullPassAt(): Long? = pool.resource.use { it.get(LAST_FULL_PASS_KEY)?.toLongOrNull() }
+
+    override fun putLastFullPassAt(epochSeconds: Long) {
+        pool.resource.use { it.set(LAST_FULL_PASS_KEY, epochSeconds.toString()) }
+    }
+
     override fun setZapsVia(
         pubkey: String,
         signer: String?,
@@ -87,6 +112,8 @@ class RedisKeyValueStore(
         const val ZAPS_VIA_PREFIX = "zaps_via:"
         const val DOMAIN_PREFIX = "resolver_domain:"
         const val CURSOR_KEY = "profile_resolver:cursor"
+        const val FULL_PASS_KEY = "profile_resolver:full_pass"
+        const val LAST_FULL_PASS_KEY = "profile_resolver:last_full_pass"
 
         /** A `lud06` URL can be long; its hash keeps the key small. */
         fun addressKey(url: String): String {

@@ -49,4 +49,18 @@ class DomainGateTest {
             gate.call("up.example") { FetchResult.AddressGone(404) }
             assertNull(store.domains["up.example"])
         }
+
+    @Test
+    fun aServerErrorDoesNotMarkTheDomainDown() =
+        runTest {
+            gate.call("up.example") { FetchResult.ServerError(500) }
+            assertNull(store.domains["up.example"])
+        }
+
+    @Test
+    fun theGateKeyIsTheHostOkHttpDials() {
+        assertEquals("wallet.example", domainOf("https://Wallet.Example./.well-known/lnurlp/a"))
+        assertEquals("wallet.example", domainOf("https://wallet.example:443/x"))
+        assertNull(domainOf("not a url"))
+    }
 }

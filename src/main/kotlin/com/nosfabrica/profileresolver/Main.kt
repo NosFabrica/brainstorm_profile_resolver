@@ -45,7 +45,14 @@ private suspend fun run(
                         nip05 = Nip05Verifier(http, gate),
                         nip05RecheckSeconds = config.nip05RecheckDays * 86_400,
                     )
-                ResolverJob(config.mode, graph, store, source, resolver).run(startedAt)
+                ResolverJob(
+                    config.mode,
+                    graph,
+                    store,
+                    source,
+                    resolver,
+                    fullPassEverySeconds = config.fullPassEveryDays.takeIf { it > 0 }?.let { it * 86_400 },
+                ).run(startedAt)
             }
         }
     }

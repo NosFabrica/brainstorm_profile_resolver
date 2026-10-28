@@ -16,6 +16,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import org.slf4j.LoggerFactory
+import java.util.concurrent.ConcurrentHashMap
 
 /** Counts for the run's log line. */
 data class Tally(
@@ -48,14 +49,26 @@ class ProfileResolver(
     private val nip05: Nip05Verifier,
     private val nip05RecheckSeconds: Long,
     private val nowSeconds: () -> Long = { System.currentTimeMillis() / 1000 },
-    /** A domain with at least this many "listed to another key" answers in a batch... */
+    /** A domain with at least this many "listed to another key" answers in a run... */
     private val doubtMinimum: Int = 10,
-    /** ...making up at least this share of its checks there, is doubted rather than believed. */
+    /** ...making up at least this share of its checks, is doubted rather than believed. */
     private val doubtShare: Double = 0.5,
+    /**
+     * A suspicion is confirmed only by a check at least this much later: a SUSPECTED user is
+     * not due again sooner, so the retry pass can't confirm what the profile pass just found.
+     */
+    private val confirmGapSeconds: Long = 12 * 3600,
 ) {
     private val log = LoggerFactory.getLogger(ProfileResolver::class.java)
 
     val tally = Tally()
+
+    /** Per domain, this run's checks and how many named someone else: (checks, others). */
+    private val domainChecks = ConcurrentHashMap<String, Pair<Int, Int>>()
+    private val doubted = ConcurrentHashMap.newKeySet<String>()
+
+    /** Suspicions written this run, by domain: undone in [finish] if their domain is doubted later. */
+    private val suspicions = ConcurrentHashMap<String, MutableMap<String, Nip05Write>>()
 
     /** One batch of profiles, newest per author kept. */
     suspend fun process(profiles: List<ProfileFields>) {
@@ -108,7 +121,7 @@ class ProfileResolver(
         after = ""
         val checkedBefore = nowSeconds() - nip05RecheckSeconds
         while (true) {
-            val page = graph.nip05Due(checkedBefore, after, pageSize)
+            val page = graph.nip05Due(checkedBefore, nowSeconds() - confirmGapSeconds, after, pageSize)
             if (page.isEmpty()) break
             coroutineScope {
                 val due = page.mapNotNull { user -> user.nip05?.let { Nip05Id.parse(it) }?.let { user to it } }
@@ -118,6 +131,20 @@ class ProfileResolver(
             }
             after = page.last().pubkey
         }
+    }
+
+    /**
+     * Ends the run: a domain doubted only once its names had come in across many batches
+     * still had suspicions written before then; those become [Nip05Status.UNKNOWN] too.
+     */
+    fun finish() {
+        val written = doubted.flatMap { domain -> suspicions.remove(domain)?.values.orEmpty() }
+        if (written.isEmpty()) return
+        // Only what still stands: a later write this run may have replaced it.
+        val now = graph.users(written.map { it.pubkey })
+        val undone = written.filter { w -> now[w.pubkey]?.let { it.nip05 == w.nip05 && it.nip05Status == w.status } == true }
+        graph.writeNip05(undone.map { it.copy(status = Nip05Status.UNKNOWN) })
+        tally.nip05Impersonations -= undone.count { it.status == Nip05Status.IMPERSONATION }
     }
 
     private suspend fun resolveLightning(
@@ -132,20 +159,23 @@ class ProfileResolver(
 
     /**
      * Checks into statuses. A name listed to another key is only [Nip05Status.SUSPECTED] the first
-     * time, and becomes [Nip05Status.IMPERSONATION] when the next check agrees — one bad answer
-     * from a domain must not zero anyone. A domain answering "someone else's" for many of its
-     * names at once is doubted instead: that is a domain fault, not a crowd of impersonators.
+     * time, and becomes [Nip05Status.IMPERSONATION] when a check at least [confirmGapSeconds] later
+     * agrees — one bad answer from a domain must not zero anyone. A domain answering "someone
+     * else's" for many of its names in a run is doubted instead: that is a domain fault, not a
+     * crowd of impersonators. The count spans the run, not the batch: a full pass walks users by
+     * pubkey, so one domain's names arrive a few per batch.
      */
     private fun settle(checks: List<Pair<UserState, Pair<Nip05Id, Nip05Check>>>): List<Nip05Write> {
-        val doubted =
-            checks
-                .groupBy({ it.second.first.domain }, { it.second.second })
-                .filterValues { results ->
-                    val others = results.count { it == Nip05Check.LISTED_TO_OTHER }
-                    others >= doubtMinimum && others >= doubtShare * results.size
-                }.keys
-        doubted.forEach { log.warn("NIP-05 domain {} named someone else for most of its names in one batch; not penalising them", it) }
-        tally.nip05DomainsDoubted += doubted.size
+        checks.groupBy({ it.second.first.domain }, { it.second.second }).forEach { (domain, results) ->
+            val (total, others) =
+                domainChecks.merge(domain, results.size to results.count { it == Nip05Check.LISTED_TO_OTHER }) { a, b ->
+                    (a.first + b.first) to (a.second + b.second)
+                }!!
+            if (others >= doubtMinimum && others >= doubtShare * total && doubted.add(domain)) {
+                log.warn("NIP-05 domain {} named someone else for {} of {} names; not penalising them", domain, others, total)
+                tally.nip05DomainsDoubted++
+            }
+        }
 
         val now = nowSeconds()
         return checks.map { (user, check) ->
@@ -159,6 +189,7 @@ class ProfileResolver(
                     Nip05Check.LISTED_TO_OTHER ->
                         when {
                             id.domain in doubted -> Nip05Status.UNKNOWN
+                            // A suspicion is due again only [confirmGapSeconds] after it was written.
                             user.nip05 == id.toValue() &&
                                 (user.nip05Status == Nip05Status.SUSPECTED || user.nip05Status == Nip05Status.IMPERSONATION) ->
                                 Nip05Status.IMPERSONATION
@@ -166,13 +197,26 @@ class ProfileResolver(
                         }
                 }
             if (status == Nip05Status.IMPERSONATION) tally.nip05Impersonations++
-            Nip05Write(user.pubkey, id.toValue(), status, now)
+            Nip05Write(user.pubkey, id.toValue(), status, now).also { write ->
+                val held = suspicions[id.domain]
+                if (status == Nip05Status.SUSPECTED || status == Nip05Status.IMPERSONATION) {
+                    suspicions.computeIfAbsent(id.domain) { ConcurrentHashMap() }[user.pubkey] = write
+                } else {
+                    held?.remove(user.pubkey)
+                }
+            }
         }
     }
 
-    /** Pending, or settled longer ago than the re-check window: domains add and drop names. */
-    private fun nip05Due(user: UserState): Boolean =
-        user.nip05Status?.isFinal != true || (user.nip05CheckedAt ?: 0) < nowSeconds() - nip05RecheckSeconds
+    /** Pending, a suspicion old enough to confirm, or settled longer ago than the re-check window. */
+    private fun nip05Due(user: UserState): Boolean {
+        val checkedAt = user.nip05CheckedAt ?: 0
+        return when (user.nip05Status) {
+            null, Nip05Status.PENDING -> true
+            Nip05Status.SUSPECTED -> checkedAt <= nowSeconds() - confirmGapSeconds
+            else -> checkedAt < nowSeconds() - nip05RecheckSeconds
+        }
+    }
 
     private fun writeLightning(rows: List<LightningWrite>) {
         if (rows.isEmpty()) return

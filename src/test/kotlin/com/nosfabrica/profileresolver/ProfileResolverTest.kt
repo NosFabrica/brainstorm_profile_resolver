@@ -7,6 +7,7 @@ import com.nosfabrica.profileresolver.nip05.Nip05Verifier
 import com.nosfabrica.profileresolver.profiles.ProfileFields
 import com.nosfabrica.profileresolver.profiles.ProfileSource
 import com.nosfabrica.profileresolver.store.LnStatus
+import com.nosfabrica.profileresolver.store.FullPass
 import com.nosfabrica.profileresolver.store.Nip05Status
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
@@ -169,6 +170,7 @@ class ProfileResolverTest {
         runTest {
             val s = Setup(emptyMap(), listOf(alice), now)
             s.store.cursorValue = now - 86_400
+            s.store.lastFullPassValue = now - 86_400
             val source =
                 object : ProfileSource {
                     override suspend fun changedSince(since: Long) = ProfileSource.Changed(emptyList(), complete = false, end = "IDLE")
@@ -248,5 +250,129 @@ class ProfileResolverTest {
 
             pubkeys.forEach { assertEquals(Nip05Status.UNKNOWN, s.graph.users[it]!!.nip05Status) }
             assertEquals(1, s.resolver.tally.nip05DomainsDoubted)
+        }
+
+    @Test
+    fun aSuspicionIsNotConfirmedByTheSameRunsRetryPass() =
+        runTest {
+            // Regression: SUSPECTED was always due, so the retry pass minutes later confirmed it.
+            val url = "https://example.com/.well-known/nostr.json?name=jack"
+            val s = Setup(mapOf(url to names("jack" to alice)), listOf(bob), now)
+            s.resolver.process(listOf(profile(bob, """{"nip05":"jack@example.com"}""")))
+            s.resolver.retryDue()
+            assertEquals(Nip05Status.SUSPECTED, s.graph.users[bob]!!.nip05Status)
+            assertEquals(1, s.scripted.asked.size, "not asked again within the gap")
+            assertEquals(0, s.resolver.tally.nip05Impersonations)
+        }
+
+    @Test
+    fun aDomainIsDoubtedAcrossBatchesNotJustWithinOne() =
+        runTest {
+            // A full pass walks by pubkey, so a broken domain's names arrive one or two per batch.
+            val pubkeys = (0 until 12).map { (it + 200).toString(16).padStart(64, '0') }
+            val answers = pubkeys.indices.associate { "https://broken.example/.well-known/nostr.json?name=user$it" to names("user$it" to alice) }
+            val s = Setup(answers, pubkeys, now)
+            pubkeys.forEachIndexed { i, pk -> s.resolver.process(listOf(profile(pk, """{"nip05":"user$i@broken.example"}"""))) }
+            s.resolver.finish()
+
+            pubkeys.forEach { assertEquals(Nip05Status.UNKNOWN, s.graph.users[it]!!.nip05Status) }
+            assertEquals(1, s.resolver.tally.nip05DomainsDoubted)
+        }
+
+    @Test
+    fun aFewSuspicionsOnADomainStand() =
+        runTest {
+            val url = "https://example.com/.well-known/nostr.json?name=jack"
+            val s = Setup(mapOf(url to names("jack" to alice)), listOf(bob), now)
+            s.resolver.process(listOf(profile(bob, """{"nip05":"jack@example.com"}""")))
+            s.resolver.finish()
+            assertEquals(Nip05Status.SUSPECTED, s.graph.users[bob]!!.nip05Status)
+        }
+
+    private fun source(
+        changed: List<ProfileFields> = emptyList(),
+        byAuthor: (String) -> ProfileFields? = { null },
+    ) = object : ProfileSource {
+        val askedAuthors = mutableListOf<List<String>>()
+        var askedChanged = false
+
+        override suspend fun changedSince(since: Long): ProfileSource.Changed {
+            askedChanged = true
+            return ProfileSource.Changed(changed, complete = true, end = "EOSE")
+        }
+
+        override suspend fun byAuthors(pubkeys: List<String>): List<ProfileFields> {
+            askedAuthors += pubkeys
+            return pubkeys.mapNotNull(byAuthor)
+        }
+    }
+
+    @Test
+    fun anUnfinishedFullPassResumesWhereItStopped() =
+        runTest {
+            val s = Setup(emptyMap(), listOf(alice, bob, stranger), now)
+            s.store.cursorValue = now - 10 * 86_400
+            s.store.fullPassValue = FullPass(startedAt = now - 86_400, after = alice)
+            val src = source()
+            ResolverJob(Config.Mode.INCREMENTAL, s.graph, s.store, src, s.resolver, batchSize = 1).run(startedAt = now)
+
+            assertEquals(listOf(listOf(bob), listOf(stranger)), src.askedAuthors)
+            assertNull(s.store.fullPassValue)
+            assertEquals(now - 86_400, s.store.cursorValue, "the cursor is when the pass began, not when it ended")
+            assertEquals(now - 86_400, s.store.lastFullPassValue)
+        }
+
+    @Test
+    fun aFullPassSavesItsProgress() =
+        runTest {
+            val s = Setup(emptyMap(), listOf(alice, bob), now)
+            val src =
+                object : ProfileSource {
+                    override suspend fun changedSince(since: Long) = error("full pass")
+
+                    override suspend fun byAuthors(pubkeys: List<String>): List<ProfileFields> {
+                        if (pubkeys == listOf(bob)) error("killed")
+                        return emptyList()
+                    }
+                }
+            runCatching { ResolverJob(Config.Mode.INCREMENTAL, s.graph, s.store, src, s.resolver, batchSize = 1).run(startedAt = now) }
+            assertEquals(FullPass(now, alice), s.store.fullPassValue)
+            assertNull(s.store.cursorValue)
+        }
+
+    @Test
+    fun aWeeklyFullPassReadsUsersWhoseProfilesDidNotChange() =
+        runTest {
+            val s = Setup(mapOf(wosAlice to zaps), listOf(alice), now)
+            s.store.cursorValue = now - 86_400
+            s.store.lastFullPassValue = now - 8 * 86_400
+            val src = source { pk -> profile(pk, """{"lud16":"alice@walletofsatoshi.com"}""") }
+            ResolverJob(Config.Mode.INCREMENTAL, s.graph, s.store, src, s.resolver).run(startedAt = now)
+            assertEquals(false, src.askedChanged)
+            assertEquals(wos, s.graph.zapsVia[alice])
+            assertEquals(now, s.store.lastFullPassValue)
+
+            s.store.lastFullPassValue = now - 86_400
+            val nextNight = source()
+            ResolverJob(Config.Mode.INCREMENTAL, s.graph, s.store, nextNight, s.resolver).run(startedAt = now + 86_400)
+            assertEquals(true, nextNight.askedChanged)
+        }
+
+    @Test
+    fun theNewestProfileWinsAcrossTheWholeWalk() =
+        runTest {
+            val bobUrl = "https://walletofsatoshi.com/.well-known/lnurlp/bob"
+            val s = Setup(mapOf(wosAlice to zaps, bobUrl to zaps), listOf(alice), now)
+            s.store.cursorValue = now - 86_400
+            s.store.lastFullPassValue = now - 86_400
+            // Newest first, as the relay pages; one profile per batch.
+            val walk =
+                listOf(
+                    profile(alice, """{"lud16":"alice@walletofsatoshi.com"}""", createdAt = 2),
+                    profile(alice, """{"lud16":"bob@walletofsatoshi.com"}""", createdAt = 1),
+                )
+            ResolverJob(Config.Mode.INCREMENTAL, s.graph, s.store, source(walk), s.resolver, batchSize = 1).run(startedAt = now)
+            assertEquals(wosAlice, s.graph.users[alice]!!.lnurl)
+            assertEquals(listOf(wosAlice), s.scripted.asked)
         }
 }

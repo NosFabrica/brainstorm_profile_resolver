@@ -7,6 +7,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -41,12 +42,14 @@ class DomainGate(
         fetch: suspend () -> T,
     ): T? {
         if (isDown(domain)) return null
-        return permits.withPermit {
-            locks.computeIfAbsent(domain) { Mutex() }.withLock {
-                // Another lookup may have found it down while this one waited.
-                if (isDown(domain)) return@withLock null
-                val wait = (lastRequestAt[domain] ?: 0) + perDomainIntervalMs - nowMillis()
-                if (wait > 0) delay(wait)
+        // The domain's turn first, then a global slot: a slot is never held while waiting on one
+        // busy domain's spacing, so other domains keep moving.
+        return locks.computeIfAbsent(domain) { Mutex() }.withLock {
+            // Another lookup may have found it down while this one waited.
+            if (isDown(domain)) return@withLock null
+            val wait = (lastRequestAt[domain] ?: 0) + perDomainIntervalMs - nowMillis()
+            if (wait > 0) delay(wait)
+            permits.withPermit {
                 lastRequestAt[domain] = nowMillis()
                 fetch().also { record(domain, it) }
             }
@@ -78,10 +81,5 @@ class DomainGate(
     }
 }
 
-/** The host part of a URL, lowercased, or null. */
-fun domainOf(url: String): String? =
-    try {
-        java.net.URI(url).host?.lowercase()
-    } catch (e: Exception) {
-        null
-    }
+/** The gate key for a URL: its host as OkHttp will dial it, lowercased, without a trailing dot. */
+fun domainOf(url: String): String? = url.toHttpUrlOrNull()?.host?.lowercase()?.trimEnd('.')?.takeIf { it.isNotEmpty() }

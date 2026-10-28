@@ -19,6 +19,8 @@ class FakeStore : KeyValueStore {
     val domains = mutableMapOf<String, DomainHealth>()
     val zapsVia = mutableMapOf<String, String>()
     var cursorValue: Long? = null
+    var fullPassValue: com.nosfabrica.profileresolver.store.FullPass? = null
+    var lastFullPassValue: Long? = null
 
     override fun addressAnswer(url: String) = answers[url]
 
@@ -42,6 +44,18 @@ class FakeStore : KeyValueStore {
 
     override fun putCursor(epochSeconds: Long) {
         cursorValue = epochSeconds
+    }
+
+    override fun fullPass() = fullPassValue
+
+    override fun putFullPass(pass: com.nosfabrica.profileresolver.store.FullPass?) {
+        fullPassValue = pass
+    }
+
+    override fun lastFullPassAt() = lastFullPassValue
+
+    override fun putLastFullPassAt(epochSeconds: Long) {
+        lastFullPassValue = epochSeconds
     }
 
     override fun setZapsVia(
@@ -70,14 +84,19 @@ class FakeGraph(
     override fun pendingLightning(
         after: String,
         limit: Int,
-    ) = users.values.filter { it.lnurlStatus == LnStatus.PENDING && it.pubkey > after }.sortedBy { it.pubkey }.take(limit)
+    ) = users.values.filter { (it.lnurlStatus == LnStatus.PENDING || it.lnurlStatus == LnStatus.UNKNOWN) && it.pubkey > after }.sortedBy { it.pubkey }.take(limit)
 
     override fun nip05Due(
         checkedBefore: Long,
+        suspectedBefore: Long,
         after: String,
         limit: Int,
     ) = users.values
-        .filter { it.nip05 != null && it.pubkey > after && (it.nip05Status == Nip05Status.PENDING || it.nip05Status == Nip05Status.SUSPECTED || (it.nip05CheckedAt ?: 0) < checkedBefore) }
+        .filter {
+            val at = it.nip05CheckedAt ?: 0
+            it.nip05 != null && it.pubkey > after &&
+                (it.nip05Status == Nip05Status.PENDING || at < checkedBefore || (it.nip05Status == Nip05Status.SUSPECTED && at <= suspectedBefore))
+        }
         .sortedBy { it.pubkey }
         .take(limit)
 

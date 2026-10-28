@@ -21,17 +21,23 @@ enum class LnStatus {
     /** The endpoint answered, but does no zaps. */
     NO_ZAPS,
 
-    /** The server is up and has no such address. */
+    /** The server is up and has no such address (404 / 410). */
     NOT_FOUND,
 
     /** Never fetched: not https, a non-public host, an oversized answer. */
     INVALID,
 
-    /** Not settled yet: the domain was down. Retried on a later run, never cached. */
+    /**
+     * The server answered, but not about this address: a 403 (often a firewall), another 4xx,
+     * a redirect. Retried on a later run like [PENDING], never cached.
+     */
+    UNKNOWN,
+
+    /** Not settled yet: the domain was down or failed this URL (5xx). Retried on a later run, never cached. */
     PENDING,
     ;
 
-    val isFinal get() = this != PENDING
+    val isFinal get() = this != PENDING && this != UNKNOWN
 }
 
 /**
@@ -78,10 +84,21 @@ interface KeyValueStore {
         health: DomainHealth?,
     )
 
-    /** Epoch seconds the last complete incremental pass started at. */
+    /** Epoch seconds the last complete pass (incremental or full) started at. */
     fun cursor(): Long?
 
     fun putCursor(epochSeconds: Long)
+
+    /** The full pass a run started and did not finish, if any. */
+    fun fullPass(): FullPass?
+
+    /** Saves a full pass's progress; null when it is done. */
+    fun putFullPass(pass: FullPass?)
+
+    /** Epoch seconds the last finished full pass started at. */
+    fun lastFullPassAt(): Long?
+
+    fun putLastFullPassAt(epochSeconds: Long)
 
     /** Replaces `zaps_via:<pubkey>`, the forward set the GrapeRank worker reads. Null clears it. */
     fun setZapsVia(
@@ -89,6 +106,12 @@ interface KeyValueStore {
         signer: String?,
     )
 }
+
+/** A full pass in progress: it resumes after [after], the last pubkey it finished. */
+data class FullPass(
+    val startedAt: Long,
+    val after: String,
+)
 
 /** What the graph holds for one user, as this job last wrote it. */
 data class UserState(
@@ -134,9 +157,13 @@ interface GraphStore {
         limit: Int,
     ): List<UserState>
 
-    /** Users whose NIP-05 is pending or was last checked before [checkedBefore], after [after]. */
+    /**
+     * Users whose NIP-05 is pending, suspected and last checked before [suspectedBefore], or last
+     * checked before [checkedBefore]; after [after].
+     */
     fun nip05Due(
         checkedBefore: Long,
+        suspectedBefore: Long,
         after: String,
         limit: Int,
     ): List<UserState>

@@ -51,9 +51,12 @@ class LightningResolver(
     private suspend fun fetch(url: String): AddressAnswer {
         val domain = domainOf(url) ?: return answer(LnStatus.INVALID)
         return when (val result = gate.call(domain) { http.get(url) }) {
-            null, is FetchResult.DomainDown -> answer(LnStatus.PENDING)
+            null, is FetchResult.DomainDown, is FetchResult.ServerError -> answer(LnStatus.PENDING)
             is FetchResult.Refused -> answer(LnStatus.INVALID)
-            is FetchResult.AddressGone -> answer(LnStatus.NOT_FOUND)
+            // Only a 404 or 410 says the address doesn't exist; a 403, a redirect or another 4xx
+            // is usually a firewall or a misconfiguration, so it is retried, not settled.
+            is FetchResult.AddressGone ->
+                answer(if (result.status == 404 || result.status == 410) LnStatus.NOT_FOUND else LnStatus.UNKNOWN)
             is FetchResult.Ok -> parse(result.body)?.let { answer(LnStatus.OK, it) } ?: answer(LnStatus.NO_ZAPS)
         }
     }

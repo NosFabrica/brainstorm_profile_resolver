@@ -26,9 +26,17 @@ sealed interface FetchResult {
         val status: Int,
     ) : FetchResult
 
-    /** The server could not answer: unreachable, timed out, TLS, 5xx, 429. Back off the domain. */
+    /** The server could not answer: unreachable, timed out, TLS, 429, 408. Back off the domain. */
     data class DomainDown(
         val reason: String,
+    ) : FetchResult
+
+    /**
+     * The server is up but failed this URL (a 5xx). Retry the URL later; don't back off the
+     * domain — a 5xx can be one bad path, and a profile anyone writes can point at one.
+     */
+    data class ServerError(
+        val status: Int,
     ) : FetchResult
 
     /** Never fetched and never will be: not https, a non-public host, an oversized body. */
@@ -102,6 +110,9 @@ open class FencedHttp(
     private val client: OkHttpClient = defaultClient(),
     private val requireHttps: Boolean = true,
     private val maxBodyBytes: Long = 64 * 1024,
+    /** LNURL and NIP-05 live on the default https port; null allows any (tests only). */
+    private val allowedPorts: Set<Int>? = setOf(443),
+    private val addressAllowed: (InetAddress) -> Boolean = PublicAddress::isPublic,
 ) {
     open suspend fun get(
         url: String,
@@ -112,6 +123,9 @@ open class FencedHttp(
         val httpUrl = url.toHttpUrlOrNull() ?: return FetchResult.Refused("not a URL")
         if (requireHttps && !httpUrl.isHttps) return FetchResult.Refused("not https")
         if (httpUrl.username.isNotEmpty() || httpUrl.password.isNotEmpty()) return FetchResult.Refused("credentials in URL")
+        if (allowedPorts != null && httpUrl.port !in allowedPorts) return FetchResult.Refused("port ${httpUrl.port}")
+        // OkHttp never asks the Dns about an IP-literal host, so PublicOnlyDns can't fence those.
+        ipLiteral(httpUrl.host)?.let { if (!addressAllowed(it)) return FetchResult.Refused("non-public address ${httpUrl.host}") }
 
         val request =
             Request
@@ -132,8 +146,8 @@ open class FencedHttp(
                                 FetchResult.Ok(source.buffer.readUtf8())
                             }
                         }
-                        response.code == 429 || response.code == 408 || response.code >= 500 ->
-                            FetchResult.DomainDown("HTTP ${response.code}")
+                        response.code == 429 || response.code == 408 -> FetchResult.DomainDown("HTTP ${response.code}")
+                        response.code >= 500 -> FetchResult.ServerError(response.code)
                         else -> FetchResult.AddressGone(response.code)
                     }
                 }
@@ -146,6 +160,20 @@ open class FencedHttp(
     }
 
     companion object {
+        private val IPV4_LITERAL = Regex("^[0-9.]+$")
+
+        /** The address an IP-literal host names, without any DNS; null for a hostname. */
+        fun ipLiteral(host: String): InetAddress? =
+            if (host.contains(':') || IPV4_LITERAL.matches(host)) {
+                try {
+                    InetAddress.getByName(host)
+                } catch (e: Exception) {
+                    null
+                }
+            } else {
+                null
+            }
+
         const val USER_AGENT = "brainstorm-profile-resolver (+https://brainstorm.world)"
 
         fun defaultClient(dns: Dns = PublicOnlyDns()): OkHttpClient =

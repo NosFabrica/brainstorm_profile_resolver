@@ -16,9 +16,11 @@ data class Config(
     val perDomainIntervalMs: Long = 500,
     /** At most this many outbound lookups in flight across all domains. */
     val maxConcurrentLookups: Int = 16,
+    /** A full pass this often picks up users new to the graph; 0 turns it off. */
+    val fullPassEveryDays: Long = 7,
 ) {
     enum class Mode {
-        /** Profiles changed since the last run's cursor; the first run falls back to FULL. */
+        /** Profiles changed since the last run's cursor; the first run, and one a week, is FULL. */
         INCREMENTAL,
 
         /** Every graph user's profile, read by author. */
@@ -39,6 +41,7 @@ data class Config(
                 nip05RecheckDays = env["NIP05_RECHECK_DAYS"]?.toLong() ?: 30,
                 perDomainIntervalMs = env["PER_DOMAIN_INTERVAL_MS"]?.toLong() ?: 500,
                 maxConcurrentLookups = env["MAX_CONCURRENT_LOOKUPS"]?.toInt() ?: 16,
+                fullPassEveryDays = env["FULL_PASS_EVERY_DAYS"]?.toLong() ?: 7,
             )
         }
     }

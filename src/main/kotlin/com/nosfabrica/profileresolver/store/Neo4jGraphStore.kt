@@ -52,7 +52,7 @@ class Neo4jGraphStore(
     ): List<UserState> =
         read(
             """
-            MATCH (u:NostrUser) WHERE u.lnurl_status = 'PENDING' AND u.pubkey > ${'$'}after
+            MATCH (u:NostrUser) WHERE u.lnurl_status IN ['PENDING', 'UNKNOWN'] AND u.pubkey > ${'$'}after
             RETURN u.pubkey AS pubkey, u.lnurl AS lnurl, u.lnurl_status AS lnurl_status,
                    u.nip05 AS nip05, u.nip05_status AS nip05_status, u.nip05_checked_at AS nip05_checked_at
             ORDER BY u.pubkey LIMIT ${'$'}limit
@@ -62,18 +62,20 @@ class Neo4jGraphStore(
 
     override fun nip05Due(
         checkedBefore: Long,
+        suspectedBefore: Long,
         after: String,
         limit: Int,
     ): List<UserState> =
         read(
             """
             MATCH (u:NostrUser) WHERE u.nip05 IS NOT NULL AND u.pubkey > ${'$'}after
-              AND (u.nip05_status IN ['PENDING', 'SUSPECTED'] OR u.nip05_checked_at < ${'$'}checkedBefore)
+              AND (u.nip05_status = 'PENDING' OR u.nip05_checked_at < ${'$'}checkedBefore
+                   OR (u.nip05_status = 'SUSPECTED' AND u.nip05_checked_at <= ${'$'}suspectedBefore))
             RETURN u.pubkey AS pubkey, u.lnurl AS lnurl, u.lnurl_status AS lnurl_status,
                    u.nip05 AS nip05, u.nip05_status AS nip05_status, u.nip05_checked_at AS nip05_checked_at
             ORDER BY u.pubkey LIMIT ${'$'}limit
             """,
-            mapOf("checkedBefore" to checkedBefore, "after" to after, "limit" to limit),
+            mapOf("checkedBefore" to checkedBefore, "suspectedBefore" to suspectedBefore, "after" to after, "limit" to limit),
         )
 
     override fun writeLightning(rows: List<LightningWrite>) {

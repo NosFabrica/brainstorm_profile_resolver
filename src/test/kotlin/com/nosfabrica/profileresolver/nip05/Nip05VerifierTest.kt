@@ -63,6 +63,30 @@ class Nip05VerifierTest {
             assertEquals(Nip05Check.PENDING, v.verify(id("alice@e.example"), alice))
         }
 
+    @Test
+    fun aNameMappedToSomethingThatIsNotAKeyIsNoEvidence() =
+        runTest {
+            // A domain that maps the name to an npub or junk is broken, not naming another key.
+            val (v, _) = verifier(mapOf(id("alice@f.example").toUserUrl() to FetchResult.Ok("""{"names":{"alice":"npub1xyz"}}""")))
+            assertEquals(Nip05Check.UNKNOWN, v.verify(id("alice@f.example"), alice))
+        }
+
+    @Test
+    fun aServerErrorIsPendingAndOnlyA404Or410IsNotListed() =
+        runTest {
+            val (v, _) =
+                verifier(
+                    mapOf(
+                        id("a@g.example").toUserUrl() to FetchResult.ServerError(502),
+                        id("b@h.example").toUserUrl() to FetchResult.AddressGone(403),
+                        id("c@i.example").toUserUrl() to FetchResult.AddressGone(404),
+                    ),
+                )
+            assertEquals(Nip05Check.PENDING, v.verify(id("a@g.example"), alice))
+            assertEquals(Nip05Check.UNKNOWN, v.verify(id("b@h.example"), alice))
+            assertEquals(Nip05Check.NOT_LISTED, v.verify(id("c@i.example"), alice))
+        }
+
     private fun hex(i: Int) = i.toString(16).padStart(64, '0')
 
     private fun usersOn(

@@ -100,4 +100,28 @@ class LightningResolverTest {
         assertNull(LightningResolver.parse("not json"))
         assertEquals(signer, LightningResolver.parse("""{"allowsNostr":true,"nostrPubkey":"$signer"}"""))
     }
+
+    @Test
+    fun onlyA404Or410SettlesAnAddressAsNotFound() =
+        runTest {
+            val store = FakeStore()
+            val gone = "https://a.example/.well-known/lnurlp/gone"
+            val blocked = "https://b.example/.well-known/lnurlp/blocked"
+            val (r, _) = resolver(mapOf(gone to FetchResult.AddressGone(410), blocked to FetchResult.AddressGone(403)), store)
+            assertEquals(LnStatus.NOT_FOUND, r.resolve(gone).status)
+            // A 403 is usually a firewall: not the user's doing, and asked again next run.
+            assertEquals(LnStatus.UNKNOWN, r.resolve(blocked).status)
+            assertNull(store.answers[blocked], "unknown is never cached")
+        }
+
+    @Test
+    fun aServerErrorLeavesTheAddressPendingAndItsDomainUp() =
+        runTest {
+            val store = FakeStore()
+            val broken = "https://wallet.example/.well-known/lnurlp/broken"
+            val (r, http) = resolver(mapOf(broken to FetchResult.ServerError(500), alice to zaps()), store)
+            assertEquals(LnStatus.PENDING, r.resolve(broken).status)
+            assertEquals(LnStatus.OK, r.resolve(alice).status)
+            assertEquals(listOf(broken, alice), http.asked)
+        }
 }

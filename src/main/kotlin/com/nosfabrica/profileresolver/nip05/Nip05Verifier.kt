@@ -50,7 +50,19 @@ class Nip05Verifier(
     private val prefetchThreshold: Int = 20,
     private val maxListBytes: Long = 2L * 1024 * 1024,
 ) {
-    private val inFlight = ConcurrentHashMap<String, CompletableDeferred<FetchResult?>>()
+    /** A `?name=` lookup's outcome: the `names` it returned, or why there are none. */
+    private sealed interface Answer {
+        data class Names(
+            val names: Map<String, String>,
+        ) : Answer
+
+        data class Failed(
+            val check: Nip05Check,
+        ) : Answer
+    }
+
+    /** Lookups running now, shared by callers asking the same name; dropped when done. */
+    private val inFlight = ConcurrentHashMap<String, CompletableDeferred<Answer>>()
 
     /** Per domain, the `names` of a `nostr.json` that listed more than one: name → pubkey. */
     private val lists = ConcurrentHashMap<String, Map<String, String>>()
@@ -86,41 +98,62 @@ class Nip05Verifier(
         pubkey: String,
     ): Nip05Check {
         lists[id.domain]?.get(id.name)?.let { return judge(it, pubkey) }
-        return when (val result = fetch(id)) {
-            null, is FetchResult.DomainDown -> Nip05Check.PENDING
-            is FetchResult.Refused -> Nip05Check.UNKNOWN
-            // A 404 is the domain saying it has no such name; a 403, a redirect or another 4xx
-            // is more often a firewall or a misconfiguration than an answer about the user.
-            is FetchResult.AddressGone -> if (result.status == 404) Nip05Check.NOT_LISTED else Nip05Check.UNKNOWN
-            is FetchResult.Ok -> {
-                val names = namesOf(result.body) ?: return Nip05Check.UNKNOWN
-                // Many servers ignore `?name=` and answer with every name they hold.
-                if (names.size > 1) lists.putIfAbsent(id.domain, names)
-                names[id.name]?.let { judge(it, pubkey) } ?: Nip05Check.NOT_LISTED
-            }
+        return when (val answer = fetch(id)) {
+            is Answer.Failed -> answer.check
+            is Answer.Names -> answer.names[id.name]?.let { judge(it, pubkey) } ?: Nip05Check.NOT_LISTED
         }
     }
 
     private fun judge(
         listed: String,
         pubkey: String,
-    ) = if (listed == pubkey) Nip05Check.VERIFIED else Nip05Check.LISTED_TO_OTHER
+    ) = when {
+        // NIP-05 lists hex keys; anything else (an npub, junk) says nothing about this user.
+        !HEX_PUBKEY.matches(listed) -> Nip05Check.UNKNOWN
+        listed == pubkey -> Nip05Check.VERIFIED
+        else -> Nip05Check.LISTED_TO_OTHER
+    }
 
-    /** One request per name per run: the same name asked twice is answered from here. */
-    private suspend fun fetch(id: Nip05Id): FetchResult? {
+    private suspend fun fetch(id: Nip05Id): Answer {
         val url = id.toUserUrl()
-        val mine = CompletableDeferred<FetchResult?>()
-        val running = inFlight.putIfAbsent(url, mine)
-        if (running != null) return running.await()
+        val mine = CompletableDeferred<Answer>()
+        inFlight.putIfAbsent(url, mine)?.let { return it.await() }
         return try {
-            gate.call(id.domain) { http.get(url) }.also { mine.complete(it) }
+            answerOf(id.domain, gate.call(id.domain) { http.get(url) }).also { mine.complete(it) }
         } catch (e: Throwable) {
             mine.completeExceptionally(e)
             throw e
+        } finally {
+            inFlight.remove(url)
         }
     }
 
+    private fun answerOf(
+        domain: String,
+        result: FetchResult?,
+    ): Answer =
+        when (result) {
+            null, is FetchResult.DomainDown, is FetchResult.ServerError -> Answer.Failed(Nip05Check.PENDING)
+            is FetchResult.Refused -> Answer.Failed(Nip05Check.UNKNOWN)
+            // A 404 or 410 is the domain saying it has no such name; a 403, a redirect or another
+            // 4xx is more often a firewall or a misconfiguration than an answer about the user.
+            is FetchResult.AddressGone ->
+                Answer.Failed(if (result.status == 404 || result.status == 410) Nip05Check.NOT_LISTED else Nip05Check.UNKNOWN)
+            is FetchResult.Ok -> {
+                val names = namesOf(result.body)
+                if (names == null) {
+                    Answer.Failed(Nip05Check.UNKNOWN)
+                } else {
+                    // Many servers ignore `?name=` and answer with every name they hold.
+                    if (names.size > 1) lists.putIfAbsent(domain, names)
+                    Answer.Names(names)
+                }
+            }
+        }
+
     companion object {
+        private val HEX_PUBKEY = Regex("^[0-9a-f]{64}$")
+
         /** A `nostr.json`'s `names`, keys lowercased like [Nip05Id.name], values lowercased hex; null if it has none. */
         fun namesOf(json: String): Map<String, String>? {
             val names =
