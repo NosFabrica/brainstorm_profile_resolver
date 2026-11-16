@@ -18,7 +18,19 @@ data class Config(
     val maxConcurrentLookups: Int = 16,
     /** A full pass this often picks up users new to the graph; 0 turns it off. */
     val fullPassEveryDays: Long = 7,
+    /** Where zap signers new to the graph get their User id; null while ids are off. */
+    val scorecardDb: ScorecardDb? = null,
 ) {
+    data class ScorecardDb(
+        val host: String,
+        val port: Int,
+        val name: String,
+        val user: String,
+        val password: String,
+    ) {
+        val jdbcUrl get() = "jdbc:postgresql://$host:$port/$name"
+    }
+
     enum class Mode {
         /** Profiles changed since the last run's cursor; the first run, and one a week, is FULL. */
         INCREMENTAL,
@@ -42,6 +54,19 @@ data class Config(
                 perDomainIntervalMs = env["PER_DOMAIN_INTERVAL_MS"]?.toLong() ?: 500,
                 maxConcurrentLookups = env["MAX_CONCURRENT_LOOKUPS"]?.toInt() ?: 16,
                 fullPassEveryDays = env["FULL_PASS_EVERY_DAYS"]?.toLong() ?: 7,
+                // On, the job refuses to start without the connection: it would write nodes with no id.
+                scorecardDb =
+                    if (env["USER_IDS_ENABLED"]?.trim()?.lowercase() == "true") {
+                        ScorecardDb(
+                            host = required("SCORECARD_DB_HOST"),
+                            port = required("SCORECARD_DB_PORT").toInt(),
+                            name = required("SCORECARD_DB_NAME"),
+                            user = required("SCORECARD_DB_USER"),
+                            password = required("SCORECARD_DB_PASSWORD"),
+                        )
+                    } else {
+                        null
+                    },
             )
         }
     }

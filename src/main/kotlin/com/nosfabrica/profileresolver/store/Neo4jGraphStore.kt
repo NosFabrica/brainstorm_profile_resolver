@@ -11,13 +11,17 @@ import org.neo4j.driver.Values
  * `lnurl` / `lnurl_status`, plus a `ZAPS_VIA` edge to the signer when there is one, and
  * `nip05` / `nip05_status` / `nip05_checked_at`. Writes are managed transactions, so the driver
  * retries transient errors (the GrapeRank write-back locks the same nodes).
+ *
+ * With [userIds], a zap signer new to the graph gets its `user_id` by the id rule: the id is
+ * committed in the Scorecard database first, then set on the node where it has none.
  */
 class Neo4jGraphStore(
     private val driver: Driver,
+    private val userIds: UserIds? = null,
 ) : GraphStore,
     AutoCloseable {
-    constructor(url: String, username: String, password: String) :
-        this(GraphDatabase.driver(url, AuthTokens.basic(username, password)))
+    constructor(url: String, username: String, password: String, userIds: UserIds? = null) :
+        this(GraphDatabase.driver(url, AuthTokens.basic(username, password)), userIds)
 
     override fun close() = driver.close()
 
@@ -80,6 +84,7 @@ class Neo4jGraphStore(
 
     override fun writeLightning(rows: List<LightningWrite>) {
         if (rows.isEmpty()) return
+        if (userIds != null) return writeLightningWithIds(rows, userIds.idsFor(rows.mapNotNull { it.signer }))
         write(
             """
             UNWIND ${'$'}rows AS r
@@ -96,6 +101,29 @@ class Neo4jGraphStore(
             """,
             rows.map { mapOf("pubkey" to it.pubkey, "lnurl" to it.lnurl, "status" to it.status?.name, "signer" to it.signer) },
         )
+    }
+
+    private fun writeLightningWithIds(
+        rows: List<LightningWrite>,
+        ids: Map<String, Int>,
+    ) {
+        val params =
+            rows.map {
+                mapOf(
+                    "pubkey" to it.pubkey,
+                    "lnurl" to it.lnurl,
+                    "status" to it.status?.name,
+                    "signer" to it.signer,
+                    "signer_id" to it.signer?.let(ids::getValue),
+                )
+            }
+        driver.session().use { session ->
+            session.executeWriteWithoutResult { tx ->
+                val mismatched = tx.run(LIGHTNING_WITH_IDS, mapOf("rows" to params)).single()["mismatched"].asList { it.asString() }
+                // Thrown inside the transaction: nothing of this batch is written.
+                check(mismatched.isEmpty()) { "${mismatched.size} signers hold another user_id: ${mismatched.take(5)}" }
+            }
+        }
     }
 
     override fun writeNip05(rows: List<Nip05Write>) {
@@ -138,4 +166,24 @@ class Neo4jGraphStore(
         )
 
     private inline fun <reified E : Enum<E>> enumOrNull(name: String): E? = enumValues<E>().firstOrNull { it.name == name }
+
+    private companion object {
+        // The id is set only where there is none: never overwritten, and no write lock on a
+        // signer that already has one.
+        const val LIGHTNING_WITH_IDS = """
+            UNWIND ${'$'}rows AS r
+            MATCH (u:NostrUser {pubkey: r.pubkey})
+            SET u.lnurl = r.lnurl, u.lnurl_status = r.status
+            WITH u, r
+            OPTIONAL MATCH (u)-[old:ZAPS_VIA]->(s:NostrUser)
+            WHERE r.signer IS NULL OR s.pubkey <> r.signer
+            DELETE old
+            WITH DISTINCT u, r
+            WHERE r.signer IS NOT NULL
+            MERGE (signer:NostrUser {pubkey: r.signer})
+            FOREACH (_ IN CASE WHEN signer.user_id IS NULL THEN [1] ELSE [] END | SET signer.user_id = r.signer_id)
+            MERGE (u)-[:ZAPS_VIA]->(signer)
+            RETURN collect(DISTINCT CASE WHEN signer.user_id <> r.signer_id THEN signer.pubkey END) AS mismatched
+        """
+    }
 }

@@ -28,6 +28,14 @@ The other Brainstorm services depend on these names, so they are a contract.
 | `nip05` | The user's NIP-05 identifier, lowercased. |
 | `nip05_status` | `VERIFIED`; `SUSPECTED` (the domain lists the name under another key, seen once — re-checked at least 12 h later); `IMPERSONATION` (the same on two checks in a row); `NOT_LISTED` (the domain answered without the name, or a 404 or 410); `UNKNOWN` (a 403, redirect, unreadable answer, a non-key in `names`, or a refused URL — not the user's doing); or `PENDING` (domain down, or a 5xx). The GrapeRank worker zeroes `IMPERSONATION` and halves `NOT_LISTED` (brainstorm_server ADR 0006). |
 | `nip05_checked_at` | Epoch seconds of the last check. |
+| `user_id` on a zap signer | With `USER_IDS_ENABLED`: the signer's id from `nostr_user` (below). Set only where the node has none. |
+
+**User ids.** A zap signer can be a key the graph has never seen, and it is scored, so the node
+this job creates for it needs a `user_id`. The id rule, the same for every writer of user nodes
+(brainstorm_server ADR 0009): ask the Scorecard database's `nostr_user` table for the ids
+(insert the pubkeys that are missing, read all back), commit, then write the node, setting
+`user_id` only where there is none. A signer already holding a different id fails the batch.
+The table is the contract; brainstorm_server owns its schema.
 
 **Redis:**
 
@@ -101,6 +109,12 @@ checked on their own; and the client never uses a proxy, which would bypass the 
 | `PER_DOMAIN_INTERVAL_MS` | `500` | |
 | `MAX_CONCURRENT_LOOKUPS` | `16` | |
 | `FULL_PASS_EVERY_DAYS` | `7` | `0` leaves full passes to the first run and `FULL` mode. |
+| `USER_IDS_ENABLED` | `false` | `true` gives new zap signers a `user_id`; the job then refuses to start without the five below. |
+| `SCORECARD_DB_HOST`, `SCORECARD_DB_PORT`, `SCORECARD_DB_NAME`, `SCORECARD_DB_USER`, `SCORECARD_DB_PASSWORD` | — | The Scorecard database. Read only when ids are on. |
+
+`RESOLVER_IT=1 ./gradlew test` also runs `UserIdsIntegrationTest` against a real Neo4j and a
+Postgres that already holds `nostr_user` (`RESOLVER_IT_NEO4J`, `RESOLVER_IT_NEO4J_PASSWORD`,
+`RESOLVER_IT_PG`, `RESOLVER_IT_PG_USER`, `RESOLVER_IT_PG_PASSWORD`; defaults in the test).
 
 CI builds `ghcr.io/nosfabrica/brainstorm_profile_resolver` on every push (branch, `sha-<short>`,
 and `latest` on `main`). It runs as a nightly CronJob in
