@@ -20,6 +20,8 @@ data class Config(
     val fullPassEveryDays: Long = 7,
     /** Where zap signers new to the graph get their User id; null while ids are off. */
     val scorecardDb: ScorecardDb? = null,
+    /** The Redis sets name users by User id (`SCORES_IN_POSTGRES`). Needs [scorecardDb]. */
+    val setsByUserId: Boolean = false,
 ) {
     data class ScorecardDb(
         val host: String,
@@ -66,6 +68,12 @@ data class Config(
                         )
                     } else {
                         null
+                    },
+                setsByUserId =
+                    (env["SCORES_IN_POSTGRES"]?.trim()?.lowercase() == "true").also { on ->
+                        check(!on || env["USER_IDS_ENABLED"]?.trim()?.lowercase() == "true") {
+                            "SCORES_IN_POSTGRES needs USER_IDS_ENABLED"
+                        }
                     },
             )
         }

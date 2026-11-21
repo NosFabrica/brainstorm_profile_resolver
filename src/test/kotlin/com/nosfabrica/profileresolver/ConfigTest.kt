@@ -45,4 +45,13 @@ class ConfigTest {
             assertEquals("$missing is not set", error.message)
         }
     }
+
+    @Test
+    fun setsAreNamedByUserIdOnlyWithScoresInPostgres() {
+        val ids = base + scorecard + ("USER_IDS_ENABLED" to "true")
+        assertEquals(false, Config.fromEnv(ids).setsByUserId)
+        assertEquals(true, Config.fromEnv(ids + ("SCORES_IN_POSTGRES" to "true")).setsByUserId)
+        val error = assertFailsWith<IllegalStateException> { Config.fromEnv(base + scorecard + ("SCORES_IN_POSTGRES" to "true")) }
+        assertEquals("SCORES_IN_POSTGRES needs USER_IDS_ENABLED", error.message)
+    }
 }

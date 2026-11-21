@@ -1,5 +1,6 @@
 package com.nosfabrica.profileresolver
 
+import com.nosfabrica.profileresolver.store.SetNames
 import com.nosfabrica.profileresolver.http.DomainGate
 import com.nosfabrica.profileresolver.http.FetchResult
 import com.nosfabrica.profileresolver.lightning.LightningResolver
@@ -28,6 +29,7 @@ class ProfileResolverTest {
         answers: Map<String, FetchResult>,
         users: List<String>,
         now: Long,
+        setNames: SetNames = SetNames.pubkeys,
     ) {
         val store = FakeStore()
         val graph = FakeGraph(users)
@@ -40,6 +42,7 @@ class ProfileResolverTest {
                 nip05 = Nip05Verifier(scripted.http, DomainGate(store, 0, 8, { now })),
                 nip05RecheckSeconds = 30 * 86_400,
                 nowSeconds = { now },
+                setNames = setNames,
             )
     }
 
@@ -48,6 +51,26 @@ class ProfileResolverTest {
         content: String,
         createdAt: Long = 1,
     ) = ProfileFields.parse(pubkey, createdAt, content)
+
+    @Test
+    fun withScoresInPostgresTheWorkersSetNamesUsersByUserId() =
+        runTest {
+            val ids = mapOf(alice to 7, wos to 42)
+            val asked = mutableListOf<Collection<String>>()
+            val names =
+                SetNames.userIds { pubkeys ->
+                    asked += pubkeys
+                    pubkeys.associateWith(ids::getValue)
+                }
+            val s = Setup(mapOf(wosAlice to zaps), listOf(alice), now, names)
+            s.resolver.process(listOf(profile(alice, """{"lud16":"alice@walletofsatoshi.com"}""")))
+
+            // Key and member both by id; the graph still holds pubkeys.
+            assertEquals(mapOf("7" to "42"), s.store.zapsVia)
+            assertEquals(wos, s.graph.zapsVia[alice])
+            // One lookup for the batch, not one per user.
+            assertEquals(1, asked.size)
+        }
 
     @Test
     fun aGraphUsersAddressBecomesAnEdgeAndTheWorkersSet() =

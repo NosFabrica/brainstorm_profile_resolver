@@ -110,6 +110,7 @@ checked on their own; and the client never uses a proxy, which would bypass the 
 | `MAX_CONCURRENT_LOOKUPS` | `16` | |
 | `FULL_PASS_EVERY_DAYS` | `7` | `0` leaves full passes to the first run and `FULL` mode. |
 | `USER_IDS_ENABLED` | `false` | `true` gives new zap signers a `user_id`; the job then refuses to start without the five below. |
+| `SCORES_IN_POSTGRES` | `false` | `true` names users in `zaps_via:` by User id (key and member), as the server and the GrapeRank worker do with the same switch. Needs `USER_IDS_ENABLED`. |
 | `SCORECARD_DB_HOST`, `SCORECARD_DB_PORT`, `SCORECARD_DB_NAME`, `SCORECARD_DB_USER`, `SCORECARD_DB_PASSWORD` | — | The Scorecard database. Read only when ids are on. |
 
 `RESOLVER_IT=1 ./gradlew test` also runs `UserIdsIntegrationTest` against a real Neo4j and a
