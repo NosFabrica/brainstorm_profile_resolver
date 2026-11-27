@@ -7,6 +7,7 @@ import com.nosfabrica.profileresolver.nip05.Nip05Verifier
 import com.nosfabrica.profileresolver.profiles.SearchRelayProfiles
 import com.nosfabrica.profileresolver.store.Neo4jGraphStore
 import com.nosfabrica.profileresolver.store.PostgresUserIds
+import com.nosfabrica.profileresolver.store.SetNames
 import com.nosfabrica.profileresolver.store.RedisKeyValueStore
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
@@ -46,6 +47,7 @@ private suspend fun run(
                         lightning = LightningResolver(http, gate, store),
                         nip05 = Nip05Verifier(http, gate),
                         nip05RecheckSeconds = config.nip05RecheckDays * 86_400,
+                        setNames = if (config.setsByUserId) SetNames.userIds(userIds!!) else SetNames.pubkeys,
                     )
                 ResolverJob(
                     config.mode,

@@ -74,3 +74,18 @@ class PostgresUserIds(
         private const val READ = "SELECT id, pubkey FROM nostr_user WHERE pubkey = ANY(?)"
     }
 }
+
+/**
+ * What a user is called in the Redis sets the GrapeRank worker reads: their pubkey, or their
+ * User id once scores are in Postgres (`SCORES_IN_POSTGRES`, the same switch the server and the
+ * worker follow). Keys and members change together.
+ */
+fun interface SetNames {
+    fun of(pubkeys: Collection<String>): Map<String, String>
+
+    companion object {
+        val pubkeys = SetNames { keys -> keys.associateWith { it } }
+
+        fun userIds(ids: UserIds) = SetNames { keys -> ids.idsFor(keys).mapValues { it.value.toString() } }
+    }
+}

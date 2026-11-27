@@ -100,7 +100,10 @@ interface KeyValueStore {
 
     fun putLastFullPassAt(epochSeconds: Long)
 
-    /** Replaces `zaps_via:<pubkey>`, the forward set the GrapeRank worker reads. Null clears it. */
+    /**
+     * Replaces `zaps_via:<name>`, the forward set the GrapeRank worker reads. Null clears it.
+     * Both are the users' names in the sets ([SetNames]): pubkeys, or User ids.
+     */
     fun setZapsVia(
         pubkey: String,
         signer: String?,

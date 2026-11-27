@@ -27,6 +27,8 @@ tables are a contract with `brainstorm_server` and `brainstorm_graperank_algorit
 - **A node this job creates gets its `user_id` by the id rule** (README, "User ids"): the id is
   committed in the Scorecard database before the Neo4j write, and never overwritten. Only
   `writeLightning` creates nodes; `writeNip05` matches existing ones.
+- **`zaps_via:` names users by pubkey, or by User id with `SCORES_IN_POSTGRES`** (`SetNames`): key and
+  member switch together, with the server and the worker. One id lookup per batch.
 - **`PENDING` is never cached** in `lnurl:` — it means "ask again later", not an answer.
 - **Changing a Neo4j property, edge type or Redis key name is a cross-repo change.** The GrapeRank
   worker reads `zaps_via:`; the server reads the node properties.

@@ -4,6 +4,7 @@ import com.nosfabrica.profileresolver.lightning.LightningResolver
 import com.nosfabrica.profileresolver.nip05.Nip05Check
 import com.nosfabrica.profileresolver.nip05.Nip05Verifier
 import com.nosfabrica.profileresolver.profiles.ProfileFields
+import com.nosfabrica.profileresolver.store.SetNames
 import com.nosfabrica.profileresolver.store.GraphStore
 import com.nosfabrica.profileresolver.store.KeyValueStore
 import com.nosfabrica.profileresolver.store.LightningWrite
@@ -58,6 +59,8 @@ class ProfileResolver(
      * not due again sooner, so the retry pass can't confirm what the profile pass just found.
      */
     private val confirmGapSeconds: Long = 12 * 3600,
+    /** How users are named in the worker's `zaps_via:` sets. */
+    private val setNames: SetNames = SetNames.pubkeys,
 ) {
     private val log = LoggerFactory.getLogger(ProfileResolver::class.java)
 
@@ -222,7 +225,8 @@ class ProfileResolver(
         if (rows.isEmpty()) return
         // The worker's set first, then Neo4j: the graph is what marks a user settled, so a
         // crash between leaves the user unsettled and the next run writes both again.
-        rows.forEach { store.setZapsVia(it.pubkey, it.signer) }
+        val names = setNames.of(rows.flatMap { listOfNotNull(it.pubkey, it.signer) }.distinct())
+        rows.forEach { store.setZapsVia(names.getValue(it.pubkey), it.signer?.let(names::getValue)) }
         graph.writeLightning(rows)
         tally.lightningResolved += rows.count { it.lnurl != null }
         tally.lightningCleared += rows.count { it.lnurl == null }
