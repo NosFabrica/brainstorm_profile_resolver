@@ -6,6 +6,7 @@ import com.nosfabrica.profileresolver.lightning.LightningResolver
 import com.nosfabrica.profileresolver.nip05.Nip05Verifier
 import com.nosfabrica.profileresolver.profiles.SearchRelayProfiles
 import com.nosfabrica.profileresolver.store.Neo4jGraphStore
+import com.nosfabrica.profileresolver.store.PostgresUserIds
 import com.nosfabrica.profileresolver.store.RedisKeyValueStore
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
@@ -32,7 +33,8 @@ private suspend fun run(
     config: Config,
     startedAt: Long,
 ) {
-    Neo4jGraphStore(config.neo4jUrl, config.neo4jUsername, config.neo4jPassword).use { graph ->
+    val userIds = config.scorecardDb?.let { PostgresUserIds(it.jdbcUrl, it.user, it.password) }
+    Neo4jGraphStore(config.neo4jUrl, config.neo4jUsername, config.neo4jPassword, userIds).use { graph ->
         RedisKeyValueStore(config.redisHost, config.redisPort).use { store ->
             SearchRelayProfiles(config.searchRelayUrl).use { source ->
                 val http = FencedHttp()
